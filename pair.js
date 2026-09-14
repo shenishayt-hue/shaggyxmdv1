@@ -7259,10 +7259,6 @@ case 'pupil': {
     }
     break;
 }
- ==========================================
-// MOVIESUBLK.COM - Movie & TV Downloader
-// ==========================================
-case 'moviesublk':
 case 'msubz':
 case 'mslk': {
     if (!args.length) {
