@@ -1728,6 +1728,298 @@ case 'help': {
     break;
 }
 // ==========================================
+// DINKAMOVIES - Fixed (Server Download)
+// ==========================================
+case 'dinka':
+case 'dinkamovies':
+case 'dinkamovieslk': {
+    if (!args.length) {
+        await socket.sendMessage(sender, {
+            image: { url: sessionConfig.BOT_IMAGE || config.BOT_IMAGE },
+            caption: formatMessage(
+                '🎬 DINKAMOVIES SEARCH',
+                '*කරුණාකර චිත්‍රපටයේ හෝ කාටූනයේ නම ලබාදෙන්න!*\n\n*📌 Usage:* `.dinka ben 10`\n*📌 Usage:* `.dinka the croods`',
+                `${sessionConfig.BOT_FOOTER || config.BOT_FOOTER}`
+            )
+        }, { quoted: msg });
+        break;
+    }
+
+    const dinkaQuery = args.join(' ');
+    const DINKA_API_BASE = 'https://api.chamindu.site/api/v1/movie/dinkamovies';
+    const DINKA_API_KEY = 'chama_api_11230a80e5eed3c1b80bfcc5d1773ec9';
+    const TEMP_DIR = './tmp_dinka';
+
+    let dinkaSelectionListener = null;
+    let dinkaOptionListener = null;
+    let dinkaMasterTimeout = null;
+
+    const clearAllDinkaListeners = () => {
+        if (dinkaSelectionListener) { socket.ev.off('messages.upsert', dinkaSelectionListener); dinkaSelectionListener = null; }
+        if (dinkaOptionListener)    { socket.ev.off('messages.upsert', dinkaOptionListener);    dinkaOptionListener    = null; }
+        if (dinkaMasterTimeout)     { clearTimeout(dinkaMasterTimeout); dinkaMasterTimeout = null; }
+    };
+
+    // ⭐ Download to server
+    const downloadToServer = async (url, dest) => {
+        await fs.ensureDir(path.dirname(dest));
+        const writer = fs.createWriteStream(dest);
+        const res = await axios({
+            url,
+            method: 'GET',
+            responseType: 'stream',
+            timeout: 0,
+            maxRedirects: 5,
+            maxContentLength: Infinity,
+            maxBodyLength: Infinity,
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Referer': 'https://dinkamovies.lk/',
+                'Accept': '*/*'
+            }
+        });
+        res.data.pipe(writer);
+        return new Promise((resolve, reject) => {
+            writer.on('finish', resolve);
+            writer.on('error', reject);
+            res.data.on('error', reject);
+        });
+    };
+
+    try {
+        await socket.sendMessage(sender, {
+            text: '🔍 *DinkaMovies* හි සොයමින් පවතී...'
+        }, { quoted: msg });
+
+        // ═══ STEP 1 : SEARCH ═══
+        const searchRes = await axios.get(`${DINKA_API_BASE}/search`, {
+            params: { q: dinkaQuery, api_key: DINKA_API_KEY },
+            timeout: 60000
+        });
+
+        const searchData = searchRes.data;
+        if (!searchData.status || !searchData.data || searchData.data.length === 0) {
+            await socket.sendMessage(sender, {
+                image: { url: sessionConfig.BOT_IMAGE || config.BOT_IMAGE },
+                caption: formatMessage(
+                    '❌ NO RESULTS',
+                    `*"${dinkaQuery}"* සඳහා කිසිදු ප්‍රතිඵලයක් හමු නොවීය!`,
+                    `${sessionConfig.BOT_FOOTER || config.BOT_FOOTER}`
+                )
+            }, { quoted: msg });
+            break;
+        }
+
+        const dinkaList = searchData.data.slice(0, 20);
+        let listText = `🎬 *𝗗𝗜𝗡𝗞𝗔𝗠𝗢𝗩𝗜𝗘𝗦 𝗦𝗘𝗔𝗥𝗖𝗛 : _${dinkaQuery}_*\n╭──────●➤\n*🔢 ʀᴇᴘʟʏ ʙᴇʟᴏᴡ ɴᴜᴍʙᴇʀ*\n╰──────────●➤\n╭──────●➤\n`;
+
+        dinkaList.forEach((item, index) => {
+            listText += `*🍿 ${index + 1} ┃❭❭ ${item.title}*\n    ↳ (📅 ${item.year || 'N/A'})\n`;
+        });
+        listText += `╰──────────●➤\n> ${sessionConfig.BOT_FOOTER || config.BOT_FOOTER}`;
+
+        const searchMsg = await socket.sendMessage(sender, {
+            image: { url: dinkaList[0].poster || sessionConfig.BOT_IMAGE || config.BOT_IMAGE },
+            caption: listText
+        }, { quoted: msg });
+
+        const searchMsgID = searchMsg.key.id;
+        dinkaMasterTimeout = setTimeout(clearAllDinkaListeners, 180000);
+
+        // ═══ STEP 2 : USER PICKS A MOVIE ═══
+        const handleDinkaSelection = async ({ messages }) => {
+            const replyMek = messages?.[0];
+            if (!replyMek?.message || replyMek.key.remoteJid !== sender) return;
+
+            const text = (replyMek.message.conversation || replyMek.message.extendedTextMessage?.text || '').trim();
+            const isReply = replyMek.message.extendedTextMessage?.contextInfo?.stanzaId === searchMsgID;
+            if (!isReply) return;
+
+            const choice = parseInt(text) - 1;
+            if (isNaN(choice) || choice < 0 || choice >= dinkaList.length) {
+                return socket.sendMessage(sender, { text: `❌ කරුණාකර 1 - ${dinkaList.length} අතර අංකයක් ලබාදෙන්න!` }, { quoted: replyMek });
+            }
+
+            if (dinkaSelectionListener) { socket.ev.off('messages.upsert', dinkaSelectionListener); dinkaSelectionListener = null; }
+
+            const chosenItem = dinkaList[choice];
+            await socket.sendMessage(sender, {
+                text: `⏳ *"${chosenItem.title}"* තොරතුරු සහ Download options ලබා ගනිමින්...`
+            }, { quoted: replyMek });
+
+            try {
+                // ═══ STEP 3 : INFO ═══
+                const infoRes = await axios.get(`${DINKA_API_BASE}/infodl`, {
+                    params: { q: chosenItem.url, api_key: DINKA_API_KEY },
+                    timeout: 90000
+                });
+
+                const mediaData = infoRes.data?.data;
+                const downloads = mediaData?.downloads || [];
+
+                if (!mediaData || downloads.length === 0) {
+                    throw new Error('බාගත කිරීමේ links හෝ episodes හමු නොවීය.');
+                }
+
+                const isTv = mediaData.type === 'tv_series' || downloads[0].episode !== undefined;
+                let infoText = `🎬 *${mediaData.title}*\n\n`;
+                if (mediaData.genres?.length) infoText += `🎭 *Genres:* ${mediaData.genres.join(', ')}\n`;
+
+                if (isTv) {
+                    infoText += `📺 *Type:* TV Series / Animation\n`;
+                    infoText += `🔢 *Total Episodes:* ${downloads.length}\n\n`;
+                    infoText += `*Available Episodes:*\n╭──────●➤\n`;
+                    downloads.forEach((dl, i) => {
+                        infoText += `*${i + 1}.* ${dl.title || dl.name || `Episode ${i + 1}`}\n`;
+                    });
+                } else {
+                    infoText += `🎥 *Type:* Movie\n\n`;
+                    infoText += `*Available Qualities:*\n╭──────●➤\n`;
+                    downloads.forEach((dl, i) => {
+                        const typeBadge = dl.type ? `[${dl.type}]` : '';
+                        infoText += `*${i + 1}.* ${dl.quality || 'Download'} ${dl.size ? `┃ 📦 ${dl.size}` : ''} ${typeBadge}\n`;
+                    });
+                }
+                infoText += `╰──────────●➤\n\n👉 *බාගත කිරීමට අදාළ අංකය Reply කරන්න.*`;
+
+                const infoMsg = await socket.sendMessage(sender, {
+                    image: { url: mediaData.poster || chosenItem.poster || sessionConfig.BOT_IMAGE || config.BOT_IMAGE },
+                    caption: infoText
+                }, { quoted: replyMek });
+
+                const infoMsgID = infoMsg.key.id;
+
+                // ═══ STEP 4 : USER PICKS DOWNLOAD ═══
+                const handleOptionSelection = async ({ messages: optMessages }) => {
+                    const optMek = optMessages?.[0];
+                    if (!optMek?.message || optMek.key.remoteJid !== sender) return;
+
+                    const optText = (optMek.message.conversation || optMek.message.extendedTextMessage?.text || '').trim();
+                    const isOptReply = optMek.message.extendedTextMessage?.contextInfo?.stanzaId === infoMsgID;
+                    if (!isOptReply) return;
+
+                    const optIdx = parseInt(optText) - 1;
+                    if (isNaN(optIdx) || optIdx < 0 || optIdx >= downloads.length) {
+                        return socket.sendMessage(sender, { text: `❌ කරුණාකර 1 - ${downloads.length} අතර අංකයක් ලබාදෙන්න!` }, { quoted: optMek });
+                    }
+
+                    clearAllDinkaListeners();
+
+                    const selectedOption = downloads[optIdx];
+                    const rawUrl = selectedOption.direct_link || selectedOption.download_link || selectedOption.link || '';
+                    const cleanTitle = (mediaData.title || chosenItem.title).replace(/[^a-zA-Z0-9 ]/g, '').trim().substring(0, 50);
+                    const optLabel = (selectedOption.title || selectedOption.quality || `Part_${optIdx + 1}`).replace(/[^a-zA-Z0-9 ]/g, '').trim();
+                    const fileName = `${cleanTitle} - ${optLabel}.mp4`;
+
+                    let finalDownloadUrl = rawUrl;
+                    let linkType = 'Direct';
+
+                    // 1. Google Drive Link
+                    if (rawUrl.includes('drive.google.com') || rawUrl.includes('docs.google.com') || selectedOption.gdrive_link) {
+                        linkType = 'Google Drive';
+                        const targetGdrive = selectedOption.gdrive_link || rawUrl;
+                        const idMatch = targetGdrive.match(/(?:id=|\/d\/|file\/d\/)([a-zA-Z0-9_-]+)/);
+                        if (idMatch && idMatch[1]) {
+                            finalDownloadUrl = `https://drive.usercontent.google.com/download?id=${idMatch[1]}&export=download&confirm=t`;
+                        }
+                    }
+                    // 2. Pixeldrain
+                    else if (rawUrl.includes('pixeldrain.com') || selectedOption.pixeldrain_link) {
+                        linkType = 'Pixeldrain';
+                        const targetPd = selectedOption.pixeldrain_link || rawUrl;
+                        const pdMatch = targetPd.match(/pixeldrain\.com\/(?:u|d|api\/file)\/([a-zA-Z0-9_-]+)/);
+                        if (pdMatch && pdMatch[1]) {
+                            finalDownloadUrl = `https://pixeldrain.com/api/file/${pdMatch[1]}?download`;
+                        } else {
+                            finalDownloadUrl = targetPd;
+                        }
+                    }
+                    // 3. Direct MP4
+                    else if (rawUrl.endsWith('.mp4') || rawUrl.includes('r2.dev')) {
+                        linkType = 'Direct MP4';
+                        finalDownloadUrl = rawUrl;
+                    }
+
+                    await socket.sendMessage(sender, { react: { text: '📥', key: optMek.key } });
+
+                    await socket.sendMessage(sender, {
+                        text: `⏳ *Downloading to Server...*\n📌 *${selectedOption.title || selectedOption.quality}\n📡 *Source:* ${linkType}\n📦 *Size:* ${selectedOption.size || 'N/A'}\n\n_කරුණාකර රැඳී සිටින්න..._`
+                    }, { quoted: optMek });
+
+                    // ⭐ Server download
+                    await fs.ensureDir(TEMP_DIR);
+                    const safeName = cleanTitle.replace(/[^a-zA-Z0-9 ]/g, '_').substring(0, 50);
+                    const localFile = path.join(TEMP_DIR, `${safeName}_${Date.now()}.mp4`);
+
+                    try {
+                        await downloadToServer(finalDownloadUrl, localFile);
+
+                        const stats = await fs.stat(localFile);
+                        const realSizeMB = stats.size / 1024 / 1024;
+
+                        // ⚠️ Error page check
+                        if (realSizeMB < 1) {
+                            await fs.remove(localFile).catch(() => {});
+                            throw new Error('Download failed — file too small (error page detected)');
+                        }
+
+                        await socket.sendMessage(sender, {
+                            text: `✅ *Downloaded!*\n📦 ${realSizeMB.toFixed(1)} MB\n\n📤 _Sending to WhatsApp..._`
+                        }, { quoted: optMek });
+
+                        // ⭐ Send as document
+                        try {
+                            await socket.sendMessage(sender, {
+                                document: { url: localFile },
+                                mimetype: 'video/mp4',
+                                fileName: fileName,
+                                caption: `✅ *DINKAMOVIES DOWNLOADED*\n\n🎬 *Title:* ${mediaData.title}\n📌 *Option:* ${selectedOption.title || selectedOption.quality || 'Direct'}\n📡 *Source:* ${linkType}\n📦 *Size:* ${selectedOption.size || 'N/A'}\n> ${sessionConfig.BOT_FOOTER || config.BOT_FOOTER}`
+                            }, { quoted: optMek });
+
+                            await socket.sendMessage(sender, { react: { text: '✅', key: optMek.key } });
+
+                        } catch (sendErr) {
+                            await socket.sendMessage(sender, {
+                                text: `❌ *Send fail:* ${sendErr.message}\n\n🔗 *Direct Link:*\n${finalDownloadUrl}\n\n_IDM එකෙන් download කරන්න._`
+                            }, { quoted: optMek });
+                        }
+
+                        // Cleanup
+                        await fs.remove(localFile).catch(() => {});
+
+                    } catch (downloadErr) {
+                        console.error('[Dinka] download error:', downloadErr.message);
+                        await socket.sendMessage(sender, {
+                            text: `❌ *Download Error:* _${downloadErr.message}_\n\n🔗 *Direct Link:*\n${finalDownloadUrl}\n\n💡 _IDM එකෙන් download කරන්න._`
+                        }, { quoted: optMek });
+
+                        try { await fs.remove(localFile); } catch {}
+                    }
+                };
+
+                dinkaOptionListener = handleOptionSelection;
+                socket.ev.on('messages.upsert', dinkaOptionListener);
+
+            } catch (infoErr) {
+                clearAllDinkaListeners();
+                await socket.sendMessage(sender, {
+                    text: `❌ DinkaMovies Info Error: ${infoErr.message}`
+                }, { quoted: replyMek });
+            }
+        };
+
+        dinkaSelectionListener = handleDinkaSelection;
+        socket.ev.on('messages.upsert', dinkaSelectionListener);
+
+    } catch (err) {
+        clearAllDinkaListeners();
+        await socket.sendMessage(sender, {
+            text: `❌ DinkaMovies Error: ${err.message}`
+        }, { quoted: msg });
+    }
+    break;
+}
+// ==========================================
 // LAKVISIONTV - SHAGGY XMD
 // ==========================================
 case 'lakvision':
@@ -6996,295 +7288,6 @@ ${sessionConfig.BOT_FOOTER || config.BOT_FOOTER}`;
     }
     break; 
             }
-            case 'dinka':
-case 'dinkamovies':
-case 'dinkamovieslk': {
-    if (!args.length) {
-        await socket.sendMessage(sender, {
-            image: { url: sessionConfig.BOT_IMAGE || config.BOT_IMAGE },
-            caption: formatMessage(
-                '🎬 DINKAMOVIES SEARCH',
-                '*කරුණාකර චිත්‍රපටයේ හෝ කාටූනයේ නම ලබාදෙන්න!*\n\n*📌 Usage:* `.dinka ben 10`\n*📌 Usage:* `.dinka the croods`',
-                `${sessionConfig.BOT_FOOTER || config.BOT_FOOTER}`
-            )
-        }, { quoted: msg });
-        break;
-    }
-
-    const dinkaQuery = args.join(' ');
-    const DINKA_API_BASE = 'https://api.chamindu.site/api/v1/movie/dinkamovies';
-    const DINKA_API_KEY = 'chama_api_11230a80e5eed3c1b80bfcc5d1773ec9';
-    const TEMP_DIR = './tmp_dinka';
-
-    let dinkaSelectionListener = null;
-    let dinkaOptionListener = null;
-    let dinkaMasterTimeout = null;
-
-    const clearAllDinkaListeners = () => {
-        if (dinkaSelectionListener) { socket.ev.off('messages.upsert', dinkaSelectionListener); dinkaSelectionListener = null; }
-        if (dinkaOptionListener)    { socket.ev.off('messages.upsert', dinkaOptionListener);    dinkaOptionListener    = null; }
-        if (dinkaMasterTimeout)     { clearTimeout(dinkaMasterTimeout); dinkaMasterTimeout = null; }
-    };
-
-    // ⭐ Download to server
-    const downloadToServer = async (url, dest) => {
-        await fs.ensureDir(path.dirname(dest));
-        const writer = fs.createWriteStream(dest);
-        const res = await axios({
-            url,
-            method: 'GET',
-            responseType: 'stream',
-            timeout: 0,
-            maxRedirects: 5,
-            maxContentLength: Infinity,
-            maxBodyLength: Infinity,
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Referer': 'https://dinkamovies.lk/',
-                'Accept': '*/*'
-            }
-        });
-        res.data.pipe(writer);
-        return new Promise((resolve, reject) => {
-            writer.on('finish', resolve);
-            writer.on('error', reject);
-            res.data.on('error', reject);
-        });
-    };
-
-    try {
-        await socket.sendMessage(sender, {
-            text: '🔍 *DinkaMovies* හි සොයමින් පවතී...'
-        }, { quoted: msg });
-
-        // ═══ STEP 1 : SEARCH ═══
-        const searchRes = await axios.get(`${DINKA_API_BASE}/search`, {
-            params: { q: dinkaQuery, api_key: DINKA_API_KEY },
-            timeout: 60000
-        });
-
-        const searchData = searchRes.data;
-        if (!searchData.status || !searchData.data || searchData.data.length === 0) {
-            await socket.sendMessage(sender, {
-                image: { url: sessionConfig.BOT_IMAGE || config.BOT_IMAGE },
-                caption: formatMessage(
-                    '❌ NO RESULTS',
-                    `*"${dinkaQuery}"* සඳහා කිසිදු ප්‍රතිඵලයක් හමු නොවීය!`,
-                    `${sessionConfig.BOT_FOOTER || config.BOT_FOOTER}`
-                )
-            }, { quoted: msg });
-            break;
-        }
-
-        const dinkaList = searchData.data.slice(0, 20);
-        let listText = `🎬 *𝗗𝗜𝗡𝗞𝗔𝗠𝗢𝗩𝗜𝗘𝗦 𝗦𝗘𝗔𝗥𝗖𝗛 : _${dinkaQuery}_*\n╭──────●➤\n*🔢 ʀᴇᴘʟʏ ʙᴇʟᴏᴡ ɴᴜᴍʙᴇʀ*\n╰──────────●➤\n╭──────●➤\n`;
-
-        dinkaList.forEach((item, index) => {
-            listText += `*🍿 ${index + 1} ┃❭❭ ${item.title}*\n    ↳ (📅 ${item.year || 'N/A'})\n`;
-        });
-        listText += `╰──────────●➤\n> ${sessionConfig.BOT_FOOTER || config.BOT_FOOTER}`;
-
-        const searchMsg = await socket.sendMessage(sender, {
-            image: { url: dinkaList[0].poster || sessionConfig.BOT_IMAGE || config.BOT_IMAGE },
-            caption: listText
-        }, { quoted: msg });
-
-        const searchMsgID = searchMsg.key.id;
-        dinkaMasterTimeout = setTimeout(clearAllDinkaListeners, 180000);
-
-        // ═══ STEP 2 : USER PICKS A MOVIE ═══
-        const handleDinkaSelection = async ({ messages }) => {
-            const replyMek = messages?.[0];
-            if (!replyMek?.message || replyMek.key.remoteJid !== sender) return;
-
-            const text = (replyMek.message.conversation || replyMek.message.extendedTextMessage?.text || '').trim();
-            const isReply = replyMek.message.extendedTextMessage?.contextInfo?.stanzaId === searchMsgID;
-            if (!isReply) return;
-
-            const choice = parseInt(text) - 1;
-            if (isNaN(choice) || choice < 0 || choice >= dinkaList.length) {
-                return socket.sendMessage(sender, { text: `❌ කරුණාකර 1 - ${dinkaList.length} අතර අංකයක් ලබාදෙන්න!` }, { quoted: replyMek });
-            }
-
-            if (dinkaSelectionListener) { socket.ev.off('messages.upsert', dinkaSelectionListener); dinkaSelectionListener = null; }
-
-            const chosenItem = dinkaList[choice];
-            await socket.sendMessage(sender, {
-                text: `⏳ *"${chosenItem.title}"* තොරතුරු සහ Download options ලබා ගනිමින්...`
-            }, { quoted: replyMek });
-
-            try {
-                // ═══ STEP 3 : INFO ═══
-                const infoRes = await axios.get(`${DINKA_API_BASE}/infodl`, {
-                    params: { q: chosenItem.url, api_key: DINKA_API_KEY },
-                    timeout: 90000
-                });
-
-                const mediaData = infoRes.data?.data;
-                const downloads = mediaData?.downloads || [];
-
-                if (!mediaData || downloads.length === 0) {
-                    throw new Error('බාගත කිරීමේ links හෝ episodes හමු නොවීය.');
-                }
-
-                const isTv = mediaData.type === 'tv_series' || downloads[0].episode !== undefined;
-                let infoText = `🎬 *${mediaData.title}*\n\n`;
-                if (mediaData.genres?.length) infoText += `🎭 *Genres:* ${mediaData.genres.join(', ')}\n`;
-
-                if (isTv) {
-                    infoText += `📺 *Type:* TV Series / Animation\n`;
-                    infoText += `🔢 *Total Episodes:* ${downloads.length}\n\n`;
-                    infoText += `*Available Episodes:*\n╭──────●➤\n`;
-                    downloads.forEach((dl, i) => {
-                        infoText += `*${i + 1}.* ${dl.title || dl.name || `Episode ${i + 1}`}\n`;
-                    });
-                } else {
-                    infoText += `🎥 *Type:* Movie\n\n`;
-                    infoText += `*Available Qualities:*\n╭──────●➤\n`;
-                    downloads.forEach((dl, i) => {
-                        const typeBadge = dl.type ? `[${dl.type}]` : '';
-                        infoText += `*${i + 1}.* ${dl.quality || 'Download'} ${dl.size ? `┃ 📦 ${dl.size}` : ''} ${typeBadge}\n`;
-                    });
-                }
-                infoText += `╰──────────●➤\n\n👉 *බාගත කිරීමට අදාළ අංකය Reply කරන්න.*`;
-
-                const infoMsg = await socket.sendMessage(sender, {
-                    image: { url: mediaData.poster || chosenItem.poster || sessionConfig.BOT_IMAGE || config.BOT_IMAGE },
-                    caption: infoText
-                }, { quoted: replyMek });
-
-                const infoMsgID = infoMsg.key.id;
-
-                // ═══ STEP 4 : USER PICKS DOWNLOAD ═══
-                const handleOptionSelection = async ({ messages: optMessages }) => {
-                    const optMek = optMessages?.[0];
-                    if (!optMek?.message || optMek.key.remoteJid !== sender) return;
-
-                    const optText = (optMek.message.conversation || optMek.message.extendedTextMessage?.text || '').trim();
-                    const isOptReply = optMek.message.extendedTextMessage?.contextInfo?.stanzaId === infoMsgID;
-                    if (!isOptReply) return;
-
-                    const optIdx = parseInt(optText) - 1;
-                    if (isNaN(optIdx) || optIdx < 0 || optIdx >= downloads.length) {
-                        return socket.sendMessage(sender, { text: `❌ කරුණාකර 1 - ${downloads.length} අතර අංකයක් ලබාදෙන්න!` }, { quoted: optMek });
-                    }
-
-                    clearAllDinkaListeners();
-
-                    const selectedOption = downloads[optIdx];
-                    const rawUrl = selectedOption.direct_link || selectedOption.download_link || selectedOption.link || '';
-                    const cleanTitle = (mediaData.title || chosenItem.title).replace(/[^a-zA-Z0-9 ]/g, '').trim().substring(0, 50);
-                    const optLabel = (selectedOption.title || selectedOption.quality || `Part_${optIdx + 1}`).replace(/[^a-zA-Z0-9 ]/g, '').trim();
-                    const fileName = `${cleanTitle} - ${optLabel}.mp4`;
-
-                    let finalDownloadUrl = rawUrl;
-                    let linkType = 'Direct';
-
-                    // 1. Google Drive Link
-                    if (rawUrl.includes('drive.google.com') || rawUrl.includes('docs.google.com') || selectedOption.gdrive_link) {
-                        linkType = 'Google Drive';
-                        const targetGdrive = selectedOption.gdrive_link || rawUrl;
-                        const idMatch = targetGdrive.match(/(?:id=|\/d\/|file\/d\/)([a-zA-Z0-9_-]+)/);
-                        if (idMatch && idMatch[1]) {
-                            finalDownloadUrl = `https://drive.usercontent.google.com/download?id=${idMatch[1]}&export=download&confirm=t`;
-                        }
-                    }
-                    // 2. Pixeldrain
-                    else if (rawUrl.includes('pixeldrain.com') || selectedOption.pixeldrain_link) {
-                        linkType = 'Pixeldrain';
-                        const targetPd = selectedOption.pixeldrain_link || rawUrl;
-                        const pdMatch = targetPd.match(/pixeldrain\.com\/(?:u|d|api\/file)\/([a-zA-Z0-9_-]+)/);
-                        if (pdMatch && pdMatch[1]) {
-                            finalDownloadUrl = `https://pixeldrain.com/api/file/${pdMatch[1]}?download`;
-                        } else {
-                            finalDownloadUrl = targetPd;
-                        }
-                    }
-                    // 3. Direct MP4
-                    else if (rawUrl.endsWith('.mp4') || rawUrl.includes('r2.dev')) {
-                        linkType = 'Direct MP4';
-                        finalDownloadUrl = rawUrl;
-                    }
-
-                    await socket.sendMessage(sender, { react: { text: '📥', key: optMek.key } });
-
-                    await socket.sendMessage(sender, {
-                        text: `⏳ *Downloading to Server...*\n📌 *${selectedOption.title || selectedOption.quality}\n📡 *Source:* ${linkType}\n📦 *Size:* ${selectedOption.size || 'N/A'}\n\n_කරුණාකර රැඳී සිටින්න..._`
-                    }, { quoted: optMek });
-
-                    // ⭐ Server download
-                    await fs.ensureDir(TEMP_DIR);
-                    const safeName = cleanTitle.replace(/[^a-zA-Z0-9 ]/g, '_').substring(0, 50);
-                    const localFile = path.join(TEMP_DIR, `${safeName}_${Date.now()}.mp4`);
-
-                    try {
-                        await downloadToServer(finalDownloadUrl, localFile);
-
-                        const stats = await fs.stat(localFile);
-                        const realSizeMB = stats.size / 1024 / 1024;
-
-                        // ⚠️ Error page check
-                        if (realSizeMB < 1) {
-                            await fs.remove(localFile).catch(() => {});
-                            throw new Error('Download failed — file too small (error page detected)');
-                        }
-
-                        await socket.sendMessage(sender, {
-                            text: `✅ *Downloaded!*\n📦 ${realSizeMB.toFixed(1)} MB\n\n📤 _Sending to WhatsApp..._`
-                        }, { quoted: optMek });
-
-                        // ⭐ Send as document
-                        try {
-                            await socket.sendMessage(sender, {
-                                document: { url: localFile },
-                                mimetype: 'video/mp4',
-                                fileName: fileName,
-                                caption: `✅ *DINKAMOVIES DOWNLOADED*\n\n🎬 *Title:* ${mediaData.title}\n📌 *Option:* ${selectedOption.title || selectedOption.quality || 'Direct'}\n📡 *Source:* ${linkType}\n📦 *Size:* ${selectedOption.size || 'N/A'}\n> ${sessionConfig.BOT_FOOTER || config.BOT_FOOTER}`
-                            }, { quoted: optMek });
-
-                            await socket.sendMessage(sender, { react: { text: '✅', key: optMek.key } });
-
-                        } catch (sendErr) {
-                            await socket.sendMessage(sender, {
-                                text: `❌ *Send fail:* ${sendErr.message}\n\n🔗 *Direct Link:*\n${finalDownloadUrl}\n\n_IDM එකෙන් download කරන්න._`
-                            }, { quoted: optMek });
-                        }
-
-                        // Cleanup
-                        await fs.remove(localFile).catch(() => {});
-
-                    } catch (downloadErr) {
-                        console.error('[Dinka] download error:', downloadErr.message);
-                        await socket.sendMessage(sender, {
-                            text: `❌ *Download Error:* _${downloadErr.message}_\n\n🔗 *Direct Link:*\n${finalDownloadUrl}\n\n💡 _IDM එකෙන් download කරන්න._`
-                        }, { quoted: optMek });
-
-                        try { await fs.remove(localFile); } catch {}
-                    }
-                };
-
-                dinkaOptionListener = handleOptionSelection;
-                socket.ev.on('messages.upsert', dinkaOptionListener);
-
-            } catch (infoErr) {
-                clearAllDinkaListeners();
-                await socket.sendMessage(sender, {
-                    text: `❌ DinkaMovies Info Error: ${infoErr.message}`
-                }, { quoted: replyMek });
-            }
-        };
-
-        dinkaSelectionListener = handleDinkaSelection;
-        socket.ev.on('messages.upsert', dinkaSelectionListener);
-
-    } catch (err) {
-        clearAllDinkaListeners();
-        await socket.sendMessage(sender, {
-            text: `❌ DinkaMovies Error: ${err.message}`
-        }, { quoted: msg });
-    }
-    break;
-}
 // ==========================================
 // MOVIESUBLK.COM - Movie & TV Downloader
 // ==========================================
