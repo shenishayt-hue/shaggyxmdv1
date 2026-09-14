@@ -6627,7 +6627,6 @@ case 'cinetv': {
 
     break;
 }
-
  case 'pupilmovie':
     if (!args.length) {
         await socket.sendMessage(sender, {
@@ -6996,11 +6995,8 @@ ${sessionConfig.BOT_FOOTER || config.BOT_FOOTER}`;
         }, { quoted: msg });
     }
     break; 
-}
-// ==========================================
-// DINKAMOVIES - Fixed (Server Download)
-// ==========================================
-case 'dinka':
+            }
+            case 'dinka':
 case 'dinkamovies':
 case 'dinkamovieslk': {
     if (!args.length) {
