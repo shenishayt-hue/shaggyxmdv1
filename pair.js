@@ -6919,71 +6919,94 @@ case 'cinetv': {
 
     break;
 }
- case 'pupilmovie':
+ // ==========================================
+// PUPILMOVIE - SHAGGY XMD Sinhala Dubbed Movies
+// ==========================================
+case 'pupilmovie':
+case 'pupil': {
+    const DEFAULT_FOOTER = `\n\n> 🎭 𝗦𝗛𝗔𝗚𝗚𝗬 𝗫𝗠𝗗 🎭\n> 🧬 ᴘᴏᴡᴇʀᴇᴅ ʙʏ 👑 𝗦𝗛𝗔𝗚𝗚𝗬 𝗧𝗘𝗖𝗛`;
+    const TEMP_DIR = './tmp_pupilmovie';
+
     if (!args.length) {
         await socket.sendMessage(sender, {
-            image:  { url: sessionConfig.BOT_IMAGE || config.BOT_IMAGE },
+            image: { url: sessionConfig.BOT_IMAGE || config.BOT_IMAGE },
             caption: formatMessage(
                 '❌ ERROR',
-                '*Please provide a movie name! Example: .pupilmovie spider*',
+                '*කරුණාකර චිත්‍රපටයේ නම ලබාදෙන්න! උදා: .pupilmovie spider*',
                 `${sessionConfig.BOT_FOOTER || config.BOT_FOOTER}`
             )
         }, { quoted: msg });
         break;
     }
 
-    const movieQueryF = args.join(' ');
-    await socket.sendMessage(sender, { text: '🎬 𝙎𝙚𝙖𝙧𝙘𝙝𝙞𝙣𝙜 𝙋𝙪𝙥𝙞𝙡𝙫𝙞𝙙𝙚𝙤 - 𝙎𝙞𝙣𝙝𝙖𝙡𝙖 𝘿𝙪𝙗𝙗𝙚𝙙 𝙈𝙤𝙫𝙞𝙚𝙨...' });
-
+    const movieQueryF = args.join(' ').trim();
+    const API_BASE = config.API_MAIN_URL || 'https://api-siteh-22e22e4cb068.herokuapp.com';
+    const API_KEY = config.API_KEY || 'lakiya_2f3b6c382d1236ad7a08d56331fb679935d51dfc846df2c254093fd1fff9494e';
 
     let pupilSelectionListener = null;
     let pupilDownloadListener = null;
-    let pupilSelectionTimeout = null;
-    let pupilDownloadTimeout = null;
-
-
     let pupilMasterTimeout = null;
 
-
     const clearAllPupilListeners = () => {
-        console.log('🧹 Clearing all PupilMovie listeners');
+        if (pupilSelectionListener) { socket.ev.off('messages.upsert', pupilSelectionListener); pupilSelectionListener = null; }
+        if (pupilDownloadListener)  { socket.ev.off('messages.upsert', pupilDownloadListener);  pupilDownloadListener  = null; }
+        if (pupilMasterTimeout)     { clearTimeout(pupilMasterTimeout); pupilMasterTimeout = null; }
+    };
 
+    const parseSizeMB = (s) => {
+        if (!s) return 0;
+        const m = s.toString().toUpperCase().replace(/\s/g, '').match(/([\d.]+)(GB|MB|KB)/);
+        if (!m) return 0;
+        const v = parseFloat(m[1]);
+        const u = m[2];
+        if (u === 'GB') return v * 1024;
+        if (u === 'MB') return v;
+        return 0;
+    };
 
-        if (pupilSelectionListener) {
-            socket.ev.off('messages.upsert', pupilSelectionListener);
-            pupilSelectionListener = null;
-        }
-        if (pupilSelectionTimeout) {
-            clearTimeout(pupilSelectionTimeout);
-            pupilSelectionTimeout = null;
-        }
-
-        if (pupilDownloadListener) {
-            socket.ev.off('messages.upsert', pupilDownloadListener);
-            pupilDownloadListener = null;
-        }
-        if (pupilDownloadTimeout) {
-            clearTimeout(pupilDownloadTimeout);
-            pupilDownloadTimeout = null;
-        }
-
-        if (pupilMasterTimeout) {
-            clearTimeout(pupilMasterTimeout);
-            pupilMasterTimeout = null;
-        }
+    // ⭐ Server download
+    const downloadToServer = async (url, dest) => {
+        await fs.ensureDir(path.dirname(dest));
+        const writer = fs.createWriteStream(dest);
+        const res = await axios({
+            url,
+            method: 'GET',
+            responseType: 'stream',
+            timeout: 0,
+            maxRedirects: 5,
+            maxContentLength: Infinity,
+            maxBodyLength: Infinity,
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Referer': 'https://pupilmovie.com/',
+                'Accept': '*/*'
+            }
+        });
+        res.data.pipe(writer);
+        return new Promise((resolve, reject) => {
+            writer.on('finish', resolve);
+            writer.on('error', reject);
+            res.data.on('error', reject);
+        });
     };
 
     try {
+        await socket.sendMessage(sender, {
+            text: `*❪ 𝗦𝗛𝗔𝗚𝗚𝗬 𝗫𝗠𝗗 𝗦𝗘𝗔𝗥𝗖𝗛𝗜𝗡𝗚 ❫*\n\n🔍 *Searching PupilVideo for:* _${movieQueryF}_\n⚡ _Please wait..._`
+        }, { quoted: msg });
 
-        const searchResponse = await axios.get(`${config.API_MAIN_URL}/pupilvideo/search?query=${encodeURIComponent(movieQueryF)}&api_key=${config.API_KEY}`);
+        // ═══ STEP 1 : SEARCH ═══
+        const searchResponse = await axios.get(`${API_BASE}/pupilvideo/search?query=${encodeURIComponent(movieQueryF)}&api_key=${API_KEY}`, {
+            timeout: 60000
+        });
         const searchData = searchResponse.data;
 
         if (!searchData.status || !searchData.data?.results || searchData.data.results.length === 0) {
             await socket.sendMessage(sender, {
-                image:  { url: sessionConfig.BOT_IMAGE || config.BOT_IMAGE },
+                image: { url: sessionConfig.BOT_IMAGE || config.BOT_IMAGE },
                 caption: formatMessage(
                     '❌ NO RESULTS',
-                    '*No movies found! 😞*',
+                    '*කිසිදු චිත්‍රපටයක් හමු නොවීය!*',
                     `${sessionConfig.BOT_FOOTER || config.BOT_FOOTER}`
                 )
             }, { quoted: msg });
@@ -6991,31 +7014,24 @@ case 'cinetv': {
         }
 
         const movies = searchData.data.results.slice(0, 25);
-        let listText = `❐ *𝗦𝗘𝗔𝗥𝗖𝗛 _${movieQueryF}_*
-╭──────●➤
-*🔢 ʀᴇᴘʟʏ ʙᴇʟᴏᴡ ɴᴜᴍʙᴇʀ*
-╰──────────●➤
-╭──────●➤\n`;
+        let listText = `*❪ 𝗦𝗛𝗔𝗚𝗚𝗬 𝗫𝗠𝗗 • 𝗣𝗨𝗣𝗜𝗟𝗩𝗜𝗗𝗘𝗢 ❫*\n\n🎯 *Query:* _${movieQueryF}_\n📊 *Results:* _${movies.length} Items_\n\n*👇 SELECT A NUMBER 👇*\n\n`;
+
         movies.forEach((movie, index) => {
-            listText += `🎀 *${index + 1} ┃➤  ${movie.title}*\n`;
+            const num = (index + 1) < 10 ? `0${index + 1}` : `${index + 1}`;
+            listText += `*${num}* ➜ 🎀 _${movie.title}*\n`;
         });
 
-        listText += `\n╰──────────●➤\n${sessionConfig.BOT_FOOTER || config.BOT_FOOTER}`;
+        listText += `\n📌 _Reply with number to download!_${DEFAULT_FOOTER}`;
 
         const sentMsg = await socket.sendMessage(sender, {
-            image:  { url: sessionConfig.BOT_IMAGE || config.BOT_IMAGE },
+            image: { url: sessionConfig.BOT_IMAGE || config.BOT_IMAGE },
             caption: listText
         }, { quoted: msg });
 
         const messageID = sentMsg.key.id;
+        pupilMasterTimeout = setTimeout(clearAllPupilListeners, 180000);
 
-
-        pupilMasterTimeout = setTimeout(() => {
-            clearAllPupilListeners();
-            console.log('🧹 PupilMovie master timeout - All listeners cleared after 3 minutes');
-        }, 180000);
-
-
+        // ═══ STEP 2 : USER PICKS MOVIE ═══
         const handleSelection = async ({ messages: replyMessages }) => {
             const replyMek = replyMessages[0];
             if (!replyMek?.message) return;
@@ -7024,44 +7040,28 @@ case 'cinetv': {
             const isReplyToSentMsg = replyMek.message.extendedTextMessage?.contextInfo?.stanzaId === messageID;
 
             if (isReplyToSentMsg && sender === replyMek.key.remoteJid) {
-
-                if (pupilSelectionTimeout) {
-                    clearTimeout(pupilSelectionTimeout);
-                    pupilSelectionTimeout = null;
-                }
-
-
-                pupilSelectionTimeout = setTimeout(() => {
-                    if (pupilSelectionListener) {
-                        socket.ev.off('messages.upsert', pupilSelectionListener);
-                        pupilSelectionListener = null;
-                        console.log('🧹 PupilMovie selection listener timeout');
-                    }
-                    pupilSelectionTimeout = null;
-                }, 120000);
-
                 const choice = parseInt(messageType) - 1;
                 if (isNaN(choice) || choice < 0 || choice >= movies.length) {
-                    await socket.sendMessage(sender, {
-                        image: { url: sessionConfig.BOT_IMAGE || config.BOT_IMAGE},
+                    return socket.sendMessage(sender, {
+                        image: { url: sessionConfig.BOT_IMAGE || config.BOT_IMAGE },
                         caption: formatMessage(
                             '❌ INVALID SELECTION',
-                            `*Invalid number! Choose between 1-${movies.length}! 😕*`,
+                            `*වැරදි අංකයක්! 1-${movies.length} අතර තෝරන්න!*`,
                             `${sessionConfig.BOT_FOOTER || config.BOT_FOOTER}`
                         )
                     }, { quoted: replyMek });
-                    return;
                 }
 
-                const selectedMovie = movies[choice];
+                if (pupilSelectionListener) { socket.ev.off('messages.upsert', pupilSelectionListener); pupilSelectionListener = null; }
 
-                await socket.sendMessage(sender, { 
-                    text: '📽️ 𝙁𝙚𝙩𝙘𝙝𝙞𝙣𝙜 𝙢𝙤𝙫𝙞𝙚 𝙙𝙚𝙩𝙖𝙞𝙡𝙨...' 
-                }, { quoted: replyMek });
+                const selectedMovie = movies[choice];
+                await socket.sendMessage(sender, { text: '📽️ *Fetching movie details...*' }, { quoted: replyMek });
 
                 try {
-
-                    const infoResponse = await axios.get(`${config.API_MAIN_URL}/pupilvideo/movie?url=${encodeURIComponent(selectedMovie.url)}&api_key=${config.API_KEY}`);
+                    // ═══ STEP 3 : INFO ═══
+                    const infoResponse = await axios.get(`${API_BASE}/pupilvideo/movie?url=${encodeURIComponent(selectedMovie.url)}&api_key=${API_KEY}`, {
+                        timeout: 90000
+                    });
                     const infoData = infoResponse.data;
 
                     if (!infoData.status || !infoData.data) {
@@ -7071,74 +7071,59 @@ case 'cinetv': {
                     const movieInfo = infoData.data;
                     const allDownloadLinks = movieInfo.download_links || [];
 
-
-                    const filteredLinks = allDownloadLinks;
-
-                    if (filteredLinks.length === 0) {
-                        await socket.sendMessage(sender, {
-                            image:  { url: sessionConfig.BOT_IMAGE || config.BOT_IMAGE },
+                    if (allDownloadLinks.length === 0) {
+                        return socket.sendMessage(sender, {
+                            image: { url: sessionConfig.BOT_IMAGE || config.BOT_IMAGE },
                             caption: formatMessage(
                                 '❌ NO DOWNLOADS',
-                                '*No download links available for this movie!*',
+                                '*බාගත කිරීම් හමු නොවීය!*',
                                 `${sessionConfig.BOT_FOOTER || config.BOT_FOOTER}`
                             )
                         }, { quoted: replyMek });
-                        return;
                     }
 
-
-                    const processedLinks = filteredLinks.map(link => {
+                    const processedLinks = allDownloadLinks.map(link => {
                         const url = link.url || '';
                         if (url.includes('iws.sinhalachr.workers.dev') && !url.includes('download=true')) {
                             const separator = url.includes('?') ? '&' : '?';
-                            return {
-                                ...link,
-                                url: url + separator + 'download=true'
-                            };
+                            return { ...link, url: url + separator + 'download=true' };
                         }
                         return link;
                     });
 
-
-                    const detailsCaption = formatMessage(
-                        `☘️ 𝗧ɪᴛʟᴇ : _${movieInfo.title}_`,
-                        `▫️📝 *Tagline ➟* _${movieInfo.title}_
-▫️🥇 *𝗜ᴍᴅʙ 𝗥ᴀᴛɪɴɢ ➟* _${movieInfo.metadata?.imdb_rating || 'N/A'}/10_
-▫️📅 *𝗥ᴇʟᴇᴀꜱᴇ 𝗬ᴇᴀʀ ➟* _${movieInfo.metadata?.year || 'N/A'}_
-▫️⏳ *𝗗ᴜʀᴀᴛɪᴏɴ ➟* _${movieInfo.metadata?.runtime || 'N/A'}_
-▫️🎭 *𝗚ᴇɴʀᴇꜱ ➟* _${movieInfo.categories?.join(', ') || 'N/A'}_
-▫️👨‍💻 *𝗔ᴜᴛʜᴏʀ ➟* _${movieInfo.author || 'N/A'}_
-▫️*📖 ꜱᴛᴏʀʏ ➟*_${movieInfo.description?.substring(0, 200) || 'No description available'}..._`,
-                        `${sessionConfig.MOVIE_FOOTER || config.MOVIE_FOOTER}`
-                    );
+                    // Movie details
+                    let detailsText = `*❪ 𝗦𝗛𝗔𝗚𝗚𝗬 𝗫𝗠𝗗 • 𝗣𝗨𝗣𝗜𝗟𝗩𝗜𝗗𝗘𝗢 ❫*\n\n`;
+                    detailsText += `🎬 *${movieInfo.title || selectedMovie.title}*\n`;
+                    if (movieInfo.metadata?.imdb_rating) detailsText += `⭐ *IMDb:* ${movieInfo.metadata.imdb_rating}\n`;
+                    if (movieInfo.metadata?.year) detailsText += `📅 *Year:* ${movieInfo.metadata.year}\n`;
+                    if (movieInfo.metadata?.runtime) detailsText += `⏳ *Runtime:* ${movieInfo.metadata.runtime}\n`;
+                    if (movieInfo.categories?.length) detailsText += `🎭 *Genres:* ${movieInfo.categories.join(', ')}\n`;
+                    if (movieInfo.author) detailsText += `👨‍💻 *Author:* ${movieInfo.author}\n`;
+                    detailsText += `\n`;
+                    if (movieInfo.description) detailsText += `📖 *Story:*\n_${movieInfo.description.substring(0, 200)}..._\n`;
+                    detailsText += DEFAULT_FOOTER;
 
                     const infoMsg = await socket.sendMessage(sender, {
                         image: { url: movieInfo.poster || sessionConfig.BOT_IMAGE || config.BOT_IMAGE },
-                        caption: detailsCaption
+                        caption: detailsText
                     }, { quoted: replyMek });
 
+                    // ═══ STEP 4 : DOWNLOAD OPTIONS ═══
+                    let dlText = `*❪ 𝗦𝗛𝗔𝗚𝗚𝗬 𝗫𝗠𝗗 • 𝗗𝗢𝗪𝗡𝗟𝗢𝗔𝗗𝗦 ❫*\n\n📥 *Select Quality:*\n\n`;
+                    processedLinks.slice(0, 20).forEach((d, i) => {
+                        const num = (i + 1) < 10 ? `0${i + 1}` : `${i + 1}`;
+                        let platformEmoji = '📥';
+                        if (d.url.includes('t.me/')) platformEmoji = '📱';
+                        if (d.url.includes('cloud.sinhalachr.workers.dev')) platformEmoji = '☁️';
+                        if (d.url.includes('iws.sinhalachr.workers.dev')) platformEmoji = '🌐';
+                        dlText += `*${num}* ➜ ${platformEmoji} _${d.quality || 'Unknown'}_ (${d.file_size || 'N/A'})\n`;
+                    });
+                    dlText += `\n📌 _Reply with number to send file._${DEFAULT_FOOTER}`;
 
-                    const downloadOptionsText = `*⬇️🍀 𝗗𝗢𝗪𝗡𝗟𝗢𝗔𝗗 𝗢𝗣𝗧𝗜𝗢𝗡𝗦*
-*Reply with number 👇*
-
-${processedLinks.map((d, i) => {
-    let platformEmoji = '📥';
-    if (d.url.includes('t.me/')) platformEmoji = '📱';
-    if (d.url.includes('cloud.sinhalachr.workers.dev')) platformEmoji = '☁️';
-    if (d.url.includes('iws.sinhalachr.workers.dev')) platformEmoji = '🌐';
-    
-    return `*🎀 ${i + 1} ┃ ${platformEmoji} ${d.quality || 'Unknown'} • ${d.platform || 'Direct'} • ${d.file_size || 'N/A'}*`;
-}).join('\n')}
-
-${sessionConfig.BOT_FOOTER || config.BOT_FOOTER}`;
-
-                    const downloadMsg = await socket.sendMessage(sender, {
-                        text: downloadOptionsText
-                    }, { quoted: infoMsg });
-
+                    const downloadMsg = await socket.sendMessage(sender, { text: dlText }, { quoted: infoMsg });
                     const infoMsgID = downloadMsg.key.id;
 
-
+                    // ═══ STEP 5 : USER PICKS DOWNLOAD ═══
                     const handleDownload = async ({ messages: downloadMessages }) => {
                         const downloadMek = downloadMessages[0];
                         if (!downloadMek?.message) return;
@@ -7147,111 +7132,109 @@ ${sessionConfig.BOT_FOOTER || config.BOT_FOOTER}`;
                         const isReplyToInfoMsg = downloadMek.message.extendedTextMessage?.contextInfo?.stanzaId === infoMsgID;
 
                         if (isReplyToInfoMsg && sender === downloadMek.key.remoteJid) {
-
-                            if (pupilDownloadTimeout) {
-                                clearTimeout(pupilDownloadTimeout);
-                                pupilDownloadTimeout = null;
-                            }
-
-
-                            pupilDownloadTimeout = setTimeout(() => {
-                                if (pupilDownloadListener) {
-                                    socket.ev.off('messages.upsert', pupilDownloadListener);
-                                    pupilDownloadListener = null;
-                                    console.log('🧹 PupilMovie download listener timeout');
-                                }
-                                pupilDownloadTimeout = null;
-                            }, 120000);
-
                             const choiceNum = parseInt(downloadChoice) - 1;
 
                             if (isNaN(choiceNum) || choiceNum < 0 || choiceNum >= processedLinks.length) {
-                                await socket.sendMessage(sender, {
-                                    image: { url: sessionConfig.BOT_IMAGE || config.BOT_IMAGE},
+                                return socket.sendMessage(sender, {
+                                    image: { url: sessionConfig.BOT_IMAGE || config.BOT_IMAGE },
                                     caption: formatMessage(
                                         '❌ INVALID SELECTION',
-                                        `*Invalid number! Choose between 1-${processedLinks.length}!*`,
+                                        `*වැරදි අංකයක්! 1-${processedLinks.length} අතර තෝරන්න!*`,
                                         `${sessionConfig.BOT_FOOTER || config.BOT_FOOTER}`
                                     )
                                 }, { quoted: downloadMek });
-                                return;
                             }
 
+                            clearAllPupilListeners();
                             const selectedDownload = processedLinks[choiceNum];
                             const downloadUrl = selectedDownload.url;
+                            const sizeMB = parseSizeMB(selectedDownload.file_size);
 
-                            await socket.sendMessage(sender, { 
-                                text: `⏳ Getting your download link...` 
+                            await socket.sendMessage(sender, { react: { text: '📥', key: downloadMek.key } });
+
+                            // 🔗 Telegram → link only
+                            if (downloadUrl.includes('t.me/')) {
+                                return socket.sendMessage(sender, {
+                                    text: `📱 *𝗦𝗛𝗔𝗚𝗚𝗬 𝗫𝗠𝗗 • 𝗧𝗘𝗟𝗘𝗚𝗥𝗔𝗠*\n\n🎬 *${movieInfo.title}*\n📌 *${selectedDownload.quality || 'HD'}*\n\n🔗 *Telegram Link:*\n${downloadUrl}\n\n_Telegram bot එකෙන් download කරන්න._${DEFAULT_FOOTER}`
+                                }, { quoted: downloadMek });
+                            }
+
+                            // ⚠️ 2GB limit
+                            if (sizeMB > 2000) {
+                                return socket.sendMessage(sender, {
+                                    text: `⚠️ *File එක 2GB ඉක්මවයි!*\n\n🎬 *${movieInfo.title}*\n📌 *${selectedDownload.quality}*\n📦 *${selectedDownload.file_size}*\n\n🔗 *Direct Link:*\n${downloadUrl}\n\n_IDM එකෙන් download කරන්න._${DEFAULT_FOOTER}`
+                                }, { quoted: downloadMek });
+                            }
+
+                            await socket.sendMessage(sender, {
+                                text: `⏳ *𝗦𝗛𝗔𝗚𝗚𝗬 𝗫𝗠𝗗 • 𝗗𝗢𝗪𝗡𝗟𝗢𝗔𝗗𝗜𝗡𝗚*\n\n📌 *${selectedDownload.quality || 'HD'}*\n📦 *Size:* ${selectedDownload.file_size || 'N/A'}\n\n_කරුණාකර රැඳී සිටින්න..._`
                             }, { quoted: downloadMek });
 
+                            // ⭐ Server download
+                            await fs.ensureDir(TEMP_DIR);
+                            const safeName = (movieInfo.title || selectedMovie.title).replace(/[^a-zA-Z0-9 ]/g, '_').substring(0, 50);
+                            const localFile = path.join(TEMP_DIR, `${safeName}_${Date.now()}.mp4`);
+
                             try {
-                                await socket.sendMessage(sender, { react: { text: '📥', key: downloadMek.key } });
+                                await downloadToServer(downloadUrl, localFile);
 
+                                const stats = await fs.stat(localFile);
+                                const realSizeMB = stats.size / 1024 / 1024;
 
+                                // ⚠️ Error page check
+                                if (realSizeMB < 1) {
+                                    await fs.remove(localFile).catch(() => {});
+                                    throw new Error('Download failed — file too small (error page detected)');
+                                }
 
-                                if (downloadUrl.includes('t.me/')) {
+                                await socket.sendMessage(sender, {
+                                    text: `✅ *Downloaded!*\n📦 ${realSizeMB.toFixed(1)} MB\n\n📤 _Sending to WhatsApp..._`
+                                }, { quoted: downloadMek });
 
+                                // ⭐ Send as document
+                                const fileName = `${safeName} - ${selectedDownload.quality || 'HD'}.mp4`;
+
+                                try {
                                     await socket.sendMessage(sender, {
-                                        text: `🔗 *Telegram Download Link*\n\n${downloadUrl}\n\n⚠️ Click the link above to download from Telegram.`
-                                    }, { quoted: downloadMek });
-                                } 
-                                else if (downloadUrl.includes('sinhalachr.workers.dev')) {
-
-                                    await socket.sendMessage(sender, {
-                                        document: { url: downloadUrl },
+                                        document: { url: localFile },
                                         mimetype: 'video/mp4',
-                                        fileName: `${movieInfo.title} [${selectedDownload.quality || 'WEB-DL'}].mp4`,
+                                        fileName: fileName,
+                                        caption: `✅ *𝗦𝗛𝗔𝗚𝗚𝗬 𝗫𝗠𝗗 • 𝗣𝗨𝗣𝗜𝗟𝗩𝗜𝗗𝗘𝗢*\n\n🎬 *Title:* ${movieInfo.title || selectedMovie.title}\n📅 *Year:* ${movieInfo.metadata?.year || 'N/A'}\n📌 *Quality:* ${selectedDownload.quality || 'HD'}\n📦 *Size:* ${selectedDownload.file_size || 'N/A'}\n> 🎭 𝗦𝗛𝗔𝗚𝗚𝗬 𝗫𝗠𝗗 🎭`
+                                    }, { quoted: downloadMek });
 
-                                        caption: formatMessage(
-                                            `🍀 ${movieInfo.title}`,
-                                            `\`❚█ ${sessionConfig.MOVIE_CAPTION || config.MOVIE_CAPTION} █❚\`
+                                    await socket.sendMessage(sender, { react: { text: '✅', key: downloadMek.key } });
 
-\`[${selectedDownload.quality || 'WEB-DL'} - ${selectedDownload.file_size || 'N/A'}]\``,
-                                            `${sessionConfig.MOVIE_FOOTER || config.MOVIE_FOOTER}`
-                                        )
+                                } catch (sendErr) {
+                                    await socket.sendMessage(sender, {
+                                        text: `❌ *Send fail:* ${sendErr.message}\n\n🔗 *Direct Link:*\n${downloadUrl}\n\n_IDM එකෙන් download කරන්න._`
                                     }, { quoted: downloadMek });
                                 }
 
-                                await socket.sendMessage(sender, { react: { text: '✅', key: downloadMek.key } });
+                                // Cleanup
+                                await fs.remove(localFile).catch(() => {});
 
-
-                                clearAllPupilListeners();
-
-                            } catch (downloadError) {
-                                console.error('Download error:', downloadError);
+                            } catch (downloadErr) {
+                                console.error('[PupilMovie] download error:', downloadErr.message);
                                 await socket.sendMessage(sender, {
-                                    image:  { url: sessionConfig.BOT_IMAGE || config.BOT_IMAGE },
-                                    caption: formatMessage(
-                                        '❌ DOWNLOAD ERROR',
-                                        `*Error getting download link.*\nPlease try again later.`,
-                                        `${sessionConfig.BOT_FOOTER || config.BOT_FOOTER}`
-                                    )
+                                    text: `❌ *Download Error:* _${downloadErr.message}_\n\n🔗 *Direct Link:*\n${downloadUrl}\n\n💡 _IDM එකෙන් download කරන්න._`
                                 }, { quoted: downloadMek });
+
+                                try { await fs.remove(localFile); } catch {}
                             }
                         }
                     };
 
-
                     pupilDownloadListener = handleDownload;
-                    socket.ev.on('messages.upsert', handleDownload);
-
-
-                    pupilDownloadTimeout = setTimeout(() => {
-                        if (pupilDownloadListener) {
-                            socket.ev.off('messages.upsert', pupilDownloadListener);
-                            pupilDownloadListener = null;
-                            console.log('🧹 PupilMovie download listener timeout - cleaned up');
-                        }
-                        pupilDownloadTimeout = null;
-                    }, 120000);
+                    socket.ev.on('messages.upsert', pupilDownloadListener);
 
                 } catch (infoError) {
+                    clearAllPupilListeners();
                     console.error('Movie info error:', infoError);
                     await socket.sendMessage(sender, {
-                        image:  { url: sessionConfig.BOT_IMAGE || config.BOT_IMAGE },
+                        image: { url: sessionConfig.BOT_IMAGE || config.BOT_IMAGE },
                         caption: formatMessage(
                             '❌ ERROR',
-                            `*Error getting movie details:* ${infoError.message}`,
+                            `*Movie details ලබාගැනීමේ දෝෂයක්:* ${infoError.message}`,
                             `${sessionConfig.BOT_FOOTER || config.BOT_FOOTER}`
                         )
                     }, { quoted: replyMek });
@@ -7259,36 +7242,24 @@ ${sessionConfig.BOT_FOOTER || config.BOT_FOOTER}`;
             }
         };
 
-
         pupilSelectionListener = handleSelection;
-        socket.ev.on('messages.upsert', handleSelection);
-
-
-        pupilSelectionTimeout = setTimeout(() => {
-            if (pupilSelectionListener) {
-                socket.ev.off('messages.upsert', pupilSelectionListener);
-                pupilSelectionListener = null;
-                console.log('🧹 PupilMovie selection listener timeout - cleaned up');
-            }
-            pupilSelectionTimeout = null;
-        }, 120000);
+        socket.ev.on('messages.upsert', pupilSelectionListener);
 
     } catch (error) {
-        console.error('Movie command error:', error);
-
         clearAllPupilListeners();
+        console.error('PupilMovie command error:', error);
         await socket.sendMessage(sender, {
-            image: { url: sessionConfig.BOT_IMAGE || config.BOT_IMAGE},
+            image: { url: sessionConfig.BOT_IMAGE || config.BOT_IMAGE },
             caption: formatMessage(
                 '❌ ERROR',
-                `*An error occurred:* ${error.message || 'Unknown error'}`,
+                `*දෝෂයක් ඇතිවුණා:* ${error.message || 'Unknown error'}`,
                 `${sessionConfig.BOT_FOOTER || config.BOT_FOOTER}`
             )
         }, { quoted: msg });
     }
-    break; 
-            }
-// ==========================================
+    break;
+}
+ ==========================================
 // MOVIESUBLK.COM - Movie & TV Downloader
 // ==========================================
 case 'moviesublk':
