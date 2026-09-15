@@ -14,6 +14,209 @@ import splitFileModule from 'split-file';
 const { splitFile } = splitFileModule;
 dotenv.config();
 
+// ==========================================
+// ⭐ SHAGGY XMD - Shared Helpers
+// ==========================================
+
+const parseSizeMB = (s) => {
+    if (!s) return 0;
+    const m = s.toString().toUpperCase().replace(/\s/g, '').match(/([\d.]+)(GB|MB|KB)/);
+    if (!m) return 0;
+    const v = parseFloat(m[1]);
+    const u = m[2];
+    if (u === 'GB') return v * 1024;
+    if (u === 'MB') return v;
+    return 0;
+};
+
+// ⭐ Google Drive — HTML form extraction
+const downloadGdriveFile = async (url, dest) => {
+    await fs.ensureDir(path.dirname(dest));
+
+    const idMatch = url.match(/(?:id=|\/d\/|file\/d\/)([a-zA-Z0-9_-]+)/);
+    if (!idMatch || !idMatch[1]) throw new Error('Invalid Google Drive URL');
+
+    const fileId = idMatch[1];
+    console.log(`[GDrive] File ID: ${fileId}`);
+
+    const cookieJar = new Map();
+    const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+
+    const addCookies = (setCookies = []) => {
+        setCookies.forEach(c => {
+            const [nameVal] = c.split(';');
+            const [name, ...valParts] = nameVal.split('=');
+            cookieJar.set(name.trim(), valParts.join('=').trim());
+        });
+    };
+
+    const cookieHeader = () => Array.from(cookieJar.entries()).map(([k, v]) => `${k}=${v}`).join('; ');
+
+    try {
+        // Step 1: Get HTML page
+        console.log(`[GDrive] Step 1: Fetching HTML...`);
+
+        const firstRes = await axios.get(
+            `https://drive.usercontent.google.com/download?id=${fileId}&export=download&authuser=0`,
+            {
+                responseType: 'text',
+                timeout: 30000,
+                maxRedirects: 5,
+                headers: {
+                    'User-Agent': UA,
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                    'Accept-Language': 'en-US,en;q=0.9'
+                },
+                validateStatus: () => true
+            }
+        );
+
+        addCookies(firstRes.headers['set-cookie']);
+
+        const html = firstRes.data || '';
+        console.log(`[GDrive] HTML length: ${html.length}`);
+
+        // Step 2: Extract form action + inputs
+        const actionMatch = html.match(/<form[^>]+action="([^"]+)"/);
+        const formAction = actionMatch ? actionMatch[1].replace(/&amp;/g, '&') : null;
+
+        const inputs = {};
+        let m;
+
+        const inputRegex1 = /<input[^>]+name="([^"]+)"[^>]+value="([^"]*)"/g;
+        while ((m = inputRegex1.exec(html)) !== null) inputs[m[1]] = m[2];
+
+        const inputRegex2 = /<input[^>]+value="([^"]*)"[^>]+name="([^"]+)"/g;
+        while ((m = inputRegex2.exec(html)) !== null) inputs[m[2]] = m[1];
+
+        console.log(`[GDrive] Form action: ${formAction ? 'found' : 'none'}`);
+        console.log(`[GDrive] Inputs: ${JSON.stringify(Object.keys(inputs))}`);
+
+        // Step 3: Build download URL
+        let downloadUrl = '';
+
+        if (formAction) {
+            const params = new URLSearchParams();
+            for (const [k, v] of Object.entries(inputs)) params.append(k, v);
+            downloadUrl = `${formAction}?${params.toString()}`;
+        } else {
+            const params = new URLSearchParams({
+                id: fileId,
+                export: 'download',
+                confirm: 't'
+            });
+            if (inputs.uuid) params.append('uuid', inputs.uuid);
+            if (inputs.at) params.append('at', inputs.at);
+            downloadUrl = `https://drive.usercontent.google.com/download?${params.toString()}`;
+        }
+
+        console.log(`[GDrive] Step 2: URL: ${downloadUrl.substring(0, 100)}...`);
+
+        // Step 4: Download file
+        const writer = fs.createWriteStream(dest);
+        const fileRes = await axios({
+            url: downloadUrl,
+            method: 'GET',
+            responseType: 'stream',
+            timeout: 0,
+            maxRedirects: 10,
+            maxContentLength: Infinity,
+            maxBodyLength: Infinity,
+            headers: {
+                'User-Agent': UA,
+                'Accept': '*/*',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Cookie': cookieHeader(),
+                'Referer': `https://drive.usercontent.google.com/download?id=${fileId}&export=download`,
+                'Origin': 'https://drive.usercontent.google.com'
+            }
+        });
+
+        const ct = (fileRes.headers['content-type'] || '').toLowerCase();
+        console.log(`[GDrive] Content-Type: ${ct}`);
+
+        if (ct.includes('text/html')) {
+            fileRes.data.destroy();
+            throw new Error('Google Drive returned HTML again (blocked)');
+        }
+
+        fileRes.data.pipe(writer);
+
+        await new Promise((resolve, reject) => {
+            writer.on('finish', resolve);
+            writer.on('error', reject);
+            fileRes.data.on('error', reject);
+        });
+
+        const stats = await fs.stat(dest);
+        const sizeMB = stats.size / 1024 / 1024;
+        console.log(`[GDrive] ✅ Downloaded: ${sizeMB.toFixed(1)} MB`);
+
+        if (sizeMB < 1) {
+            await fs.remove(dest).catch(() => {});
+            throw new Error(`File too small: ${sizeMB.toFixed(2)} MB`);
+        }
+
+        return { success: true, size: stats.size };
+
+    } catch (err) {
+        console.error('[GDrive] ❌ Error:', err.message);
+        throw err;
+    }
+};
+
+// ⭐ Direct download (non-GDrive)
+const downloadDirect = async (url, dest) => {
+    await fs.ensureDir(path.dirname(dest));
+    const writer = fs.createWriteStream(dest);
+    const res = await axios({
+        url,
+        method: 'GET',
+        responseType: 'stream',
+        timeout: 0,
+        maxRedirects: 10,
+        maxContentLength: Infinity,
+        maxBodyLength: Infinity,
+        headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': '*/*'
+        }
+    });
+
+    const ct = (res.headers['content-type'] || '').toLowerCase();
+    if (ct.includes('text/html')) {
+        res.data.destroy();
+        throw new Error('HTML response (not a file)');
+    }
+
+    res.data.pipe(writer);
+    await new Promise((resolve, reject) => {
+        writer.on('finish', resolve);
+        writer.on('error', reject);
+        res.data.on('error', reject);
+    });
+
+    const stats = await fs.stat(dest);
+    if (stats.size < 1024 * 100) {
+        await fs.remove(dest).catch(() => {});
+        throw new Error(`File too small: ${(stats.size / 1024).toFixed(1)} KB`);
+    }
+
+    return { success: true, size: stats.size };
+};
+
+// ⭐ Smart downloader — auto pick GDrive or direct
+const downloadSmart = async (url, dest) => {
+    if (url.includes('drive.google.com') ||
+        url.includes('drive.usercontent.google.com') ||
+        url.includes('docs.google.com')) {
+        return await downloadGdriveFile(url, dest);
+    }
+    return await downloadDirect(url, dest);
+};
+
+console.log('✅ SHAGGY XMD Helpers loaded');
+
 import {
     default as makeWASocket,
     useMultiFileAuthState,
@@ -1568,7 +1771,8 @@ case 'help': {
   • .chithrapata — Chithrapata
   • .anime       — Anime search
   • .cartoon     — Cartoon search
-  • .dinka       — DinkaMovies
+  • .
+       — DinkaMovies
   • .cinemx      — CineMovie
   • .cartoon2  ----- cartoon dl
   • .moviemania       — Moviedl
@@ -1605,12 +1809,12 @@ case 'help': {
   • .cinetv      — TV Series
   • .movie       — Multi source
   • .subzlk      — Movie dl
-  • .msubz       — Multi source
+  • moviesubzlk       — Multi source
   • .moviemania  — Multi source
   • .zoom        - Multi source
   • .thinkiri    — TheNkiri
   • .chithrapata — Chithrapata
-  • .dinka       — DinkaMovies
+  • .dika       — Movies
   • .pupilmovie  — PupilVideo
   • .cartoon     — Cartoons.lk
   • .anime       — AnimeHeaven
@@ -1728,27 +1932,29 @@ case 'help': {
     break;
 }
 // ==========================================
-// DINKAMOVIES - Fixed (Server Download)
+// DINKAMOVIES - SHAGGY XMD (GDrive + Direct)
 // ==========================================
 case 'dinka':
 case 'dinkamovies':
 case 'dinkamovieslk': {
+    const DEFAULT_FOOTER = `\n\n> 🎭 𝗦𝗛𝗔𝗚𝗚𝗬 𝗫𝗠𝗗 🎭\n> 🧬 ᴘᴏᴡᴇʀᴇᴅ ʙʏ 👑 𝗦𝗛𝗔𝗚𝗚𝗬 𝗧𝗘𝗖𝗛`;
+    const TEMP_DIR = './tmp_dinka';
+
     if (!args.length) {
         await socket.sendMessage(sender, {
             image: { url: sessionConfig.BOT_IMAGE || config.BOT_IMAGE },
             caption: formatMessage(
                 '🎬 DINKAMOVIES SEARCH',
-                '*කරුණාකර චිත්‍රපටයේ හෝ කාටූනයේ නම ලබාදෙන්න!*\n\n*📌 Usage:* `.dinka ben 10`\n*📌 Usage:* `.dinka the croods`',
+                '*කරුණාකර චිත්‍රපටයේ නම ලබාදෙන්න!*\n\n*📌 Usage:* `.dinka ben 10`\n*📌 Usage:* `.dinka the croods`',
                 `${sessionConfig.BOT_FOOTER || config.BOT_FOOTER}`
             )
         }, { quoted: msg });
         break;
     }
 
-    const dinkaQuery = args.join(' ');
+    const dinkaQuery = args.join(' ').trim();
     const DINKA_API_BASE = 'https://api.chamindu.site/api/v1/movie/dinkamovies';
     const DINKA_API_KEY = 'chama_api_11230a80e5eed3c1b80bfcc5d1773ec9';
-    const TEMP_DIR = './tmp_dinka';
 
     let dinkaSelectionListener = null;
     let dinkaOptionListener = null;
@@ -1760,8 +1966,153 @@ case 'dinkamovieslk': {
         if (dinkaMasterTimeout)     { clearTimeout(dinkaMasterTimeout); dinkaMasterTimeout = null; }
     };
 
-    // ⭐ Download to server
-    const downloadToServer = async (url, dest) => {
+    // ⭐ Parse size
+    const parseSizeMB = (s) => {
+        if (!s) return 0;
+        const m = s.toString().toUpperCase().replace(/\s/g, '').match(/([\d.]+)(GB|MB|KB)/);
+        if (!m) return 0;
+        const v = parseFloat(m[1]);
+        const u = m[2];
+        if (u === 'GB') return v * 1024;
+        if (u === 'MB') return v;
+        return 0;
+    };
+
+    // ⭐ Google Drive Download with cookie bypass
+    const downloadGdriveFile = async (url, dest) => {
+        await fs.ensureDir(path.dirname(dest));
+
+        const idMatch = url.match(/(?:id=|\/d\/|file\/d\/)([a-zA-Z0-9_-]+)/);
+        if (!idMatch || !idMatch[1]) throw new Error('Invalid Google Drive URL');
+
+        const fileId = idMatch[1];
+        console.log(`[GDrive] File ID: ${fileId}`);
+
+        const cookieJar = new Map();
+        const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+
+        const addCookies = (setCookies = []) => {
+            setCookies.forEach(c => {
+                const [nameVal] = c.split(';');
+                const [name, ...valParts] = nameVal.split('=');
+                cookieJar.set(name.trim(), valParts.join('=').trim());
+            });
+        };
+
+        const cookieHeader = () => Array.from(cookieJar.entries()).map(([k, v]) => `${k}=${v}`).join('; ');
+
+        try {
+            // Step 1: Get HTML page
+            console.log(`[GDrive] Step 1: Fetching HTML...`);
+
+            const firstRes = await axios.get(
+                `https://drive.usercontent.google.com/download?id=${fileId}&export=download&authuser=0`,
+                {
+                    responseType: 'text',
+                    timeout: 30000,
+                    maxRedirects: 5,
+                    headers: {
+                        'User-Agent': UA,
+                        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                        'Accept-Language': 'en-US,en;q=0.9'
+                    },
+                    validateStatus: () => true
+                }
+            );
+
+            addCookies(firstRes.headers['set-cookie']);
+
+            const html = firstRes.data || '';
+            console.log(`[GDrive] HTML length: ${html.length}`);
+
+            // Step 2: Extract form + inputs
+            const actionMatch = html.match(/<form[^>]+action="([^"]+)"/);
+            const formAction = actionMatch ? actionMatch[1].replace(/&amp;/g, '&') : null;
+
+            const inputs = {};
+            let m;
+
+            const regex1 = /<input[^>]+name="([^"]+)"[^>]+value="([^"]*)"/g;
+            while ((m = regex1.exec(html)) !== null) inputs[m[1]] = m[2];
+
+            const regex2 = /<input[^>]+value="([^"]*)"[^>]+name="([^"]+)"/g;
+            while ((m = regex2.exec(html)) !== null) inputs[m[2]] = m[1];
+
+            console.log(`[GDrive] Form: ${formAction ? 'found' : 'none'}, Inputs: ${JSON.stringify(Object.keys(inputs))}`);
+
+            // Step 3: Build download URL
+            let downloadUrl = '';
+            if (formAction) {
+                const params = new URLSearchParams();
+                for (const [k, v] of Object.entries(inputs)) params.append(k, v);
+                downloadUrl = `${formAction}?${params.toString()}`;
+            } else {
+                const params = new URLSearchParams({
+                    id: fileId,
+                    export: 'download',
+                    confirm: 't'
+                });
+                if (inputs.uuid) params.append('uuid', inputs.uuid);
+                if (inputs.at) params.append('at', inputs.at);
+                downloadUrl = `https://drive.usercontent.google.com/download?${params.toString()}`;
+            }
+
+            console.log(`[GDrive] Step 2: URL: ${downloadUrl.substring(0, 100)}...`);
+
+            // Step 4: Download
+            const writer = fs.createWriteStream(dest);
+            const fileRes = await axios({
+                url: downloadUrl,
+                method: 'GET',
+                responseType: 'stream',
+                timeout: 0,
+                maxRedirects: 10,
+                maxContentLength: Infinity,
+                maxBodyLength: Infinity,
+                headers: {
+                    'User-Agent': UA,
+                    'Accept': '*/*',
+                    'Accept-Language': 'en-US,en;q=0.9',
+                    'Cookie': cookieHeader(),
+                    'Referer': `https://drive.usercontent.google.com/download?id=${fileId}&export=download`,
+                    'Origin': 'https://drive.usercontent.google.com'
+                }
+            });
+
+            const ct = (fileRes.headers['content-type'] || '').toLowerCase();
+            console.log(`[GDrive] Content-Type: ${ct}`);
+
+            if (ct.includes('text/html')) {
+                fileRes.data.destroy();
+                throw new Error('Google Drive returned HTML');
+            }
+
+            fileRes.data.pipe(writer);
+            await new Promise((resolve, reject) => {
+                writer.on('finish', resolve);
+                writer.on('error', reject);
+                fileRes.data.on('error', reject);
+            });
+
+            const stats = await fs.stat(dest);
+            const sizeMB = stats.size / 1024 / 1024;
+            console.log(`[GDrive] ✅ Downloaded: ${sizeMB.toFixed(1)} MB`);
+
+            if (sizeMB < 1) {
+                await fs.remove(dest).catch(() => {});
+                throw new Error(`File too small: ${sizeMB.toFixed(2)} MB`);
+            }
+
+            return { success: true, size: stats.size };
+
+        } catch (err) {
+            console.error('[GDrive] ❌ Error:', err.message);
+            throw err;
+        }
+    };
+
+    // ⭐ Direct download (non-GDrive)
+    const downloadDirect = async (url, dest) => {
         await fs.ensureDir(path.dirname(dest));
         const writer = fs.createWriteStream(dest);
         const res = await axios({
@@ -1769,26 +2120,50 @@ case 'dinkamovieslk': {
             method: 'GET',
             responseType: 'stream',
             timeout: 0,
-            maxRedirects: 5,
+            maxRedirects: 10,
             maxContentLength: Infinity,
             maxBodyLength: Infinity,
             headers: {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Referer': 'https://dinkamovies.lk/',
                 'Accept': '*/*'
             }
         });
+
+        const ct = (res.headers['content-type'] || '').toLowerCase();
+        if (ct.includes('text/html')) {
+            res.data.destroy();
+            throw new Error('HTML response (not a file)');
+        }
+
         res.data.pipe(writer);
-        return new Promise((resolve, reject) => {
+        await new Promise((resolve, reject) => {
             writer.on('finish', resolve);
             writer.on('error', reject);
             res.data.on('error', reject);
         });
+
+        const stats = await fs.stat(dest);
+        if (stats.size < 1024 * 100) {
+            await fs.remove(dest).catch(() => {});
+            throw new Error(`File too small: ${(stats.size / 1024).toFixed(1)} KB`);
+        }
+
+        return { success: true, size: stats.size };
+    };
+
+    // ⭐ Smart downloader
+    const downloadSmart = async (url, dest) => {
+        if (url.includes('drive.google.com') ||
+            url.includes('drive.usercontent.google.com') ||
+            url.includes('docs.google.com')) {
+            return await downloadGdriveFile(url, dest);
+        }
+        return await downloadDirect(url, dest);
     };
 
     try {
         await socket.sendMessage(sender, {
-            text: '🔍 *DinkaMovies* හි සොයමින් පවතී...'
+            text: `*❪ 𝗦𝗛𝗔𝗚𝗚𝗬 𝗫𝗠𝗗 𝗦𝗘𝗔𝗥𝗖𝗛𝗜𝗡𝗚 ❫*\n\n🔍 *Searching DinkaMovies for:* _${dinkaQuery}_\n⚡ _Please wait..._`
         }, { quoted: msg });
 
         // ═══ STEP 1 : SEARCH ═══
@@ -1811,12 +2186,13 @@ case 'dinkamovieslk': {
         }
 
         const dinkaList = searchData.data.slice(0, 20);
-        let listText = `🎬 *𝗗𝗜𝗡𝗞𝗔𝗠𝗢𝗩𝗜𝗘𝗦 𝗦𝗘𝗔𝗥𝗖𝗛 : _${dinkaQuery}_*\n╭──────●➤\n*🔢 ʀᴇᴘʟʏ ʙᴇʟᴏᴡ ɴᴜᴍʙᴇʀ*\n╰──────────●➤\n╭──────●➤\n`;
+        let listText = `*❪ 𝗦𝗛𝗔𝗚𝗚𝗬 𝗫𝗠𝗗 • 𝗗𝗜𝗡𝗞𝗔𝗠𝗢𝗩𝗜𝗘𝗦 ❫*\n\n🎯 *Query:* _${dinkaQuery}_\n📊 *Results:* _${dinkaList.length} Items_\n\n*👇 SELECT A NUMBER 👇*\n\n`;
 
         dinkaList.forEach((item, index) => {
-            listText += `*🍿 ${index + 1} ┃❭❭ ${item.title}*\n    ↳ (📅 ${item.year || 'N/A'})\n`;
+            const num = (index + 1) < 10 ? `0${index + 1}` : `${index + 1}`;
+            listText += `*${num}* ➜ 🍿 _${item.title}*\n    ↳ (📅 ${item.year || 'N/A'})\n`;
         });
-        listText += `╰──────────●➤\n> ${sessionConfig.BOT_FOOTER || config.BOT_FOOTER}`;
+        listText += `\n📌 _Reply with number to download!_${DEFAULT_FOOTER}`;
 
         const searchMsg = await socket.sendMessage(sender, {
             image: { url: dinkaList[0].poster || sessionConfig.BOT_IMAGE || config.BOT_IMAGE },
@@ -1826,7 +2202,7 @@ case 'dinkamovieslk': {
         const searchMsgID = searchMsg.key.id;
         dinkaMasterTimeout = setTimeout(clearAllDinkaListeners, 180000);
 
-        // ═══ STEP 2 : USER PICKS A MOVIE ═══
+        // ═══ STEP 2 : USER PICKS MOVIE ═══
         const handleDinkaSelection = async ({ messages }) => {
             const replyMek = messages?.[0];
             if (!replyMek?.message || replyMek.key.remoteJid !== sender) return;
@@ -1858,29 +2234,36 @@ case 'dinkamovieslk': {
                 const downloads = mediaData?.downloads || [];
 
                 if (!mediaData || downloads.length === 0) {
-                    throw new Error('බාගත කිරීමේ links හෝ episodes හමු නොවීය.');
+                    throw new Error('බාගත කිරීමේ links හමු නොවීය.');
                 }
 
                 const isTv = mediaData.type === 'tv_series' || downloads[0].episode !== undefined;
-                let infoText = `🎬 *${mediaData.title}*\n\n`;
+
+                let infoText = `*❪ 𝗦𝗛𝗔𝗚𝗚𝗬 𝗫𝗠𝗗 • 𝗗𝗜𝗡𝗞𝗔𝗠𝗢𝗩𝗜𝗘𝗦 ❫*\n\n`;
+                infoText += `🎬 *${mediaData.title}*\n`;
                 if (mediaData.genres?.length) infoText += `🎭 *Genres:* ${mediaData.genres.join(', ')}\n`;
+                infoText += `\n`;
 
                 if (isTv) {
                     infoText += `📺 *Type:* TV Series / Animation\n`;
                     infoText += `🔢 *Total Episodes:* ${downloads.length}\n\n`;
-                    infoText += `*Available Episodes:*\n╭──────●➤\n`;
+                    infoText += `*Available Episodes:*\n`;
                     downloads.forEach((dl, i) => {
                         infoText += `*${i + 1}.* ${dl.title || dl.name || `Episode ${i + 1}`}\n`;
                     });
                 } else {
                     infoText += `🎥 *Type:* Movie\n\n`;
-                    infoText += `*Available Qualities:*\n╭──────●➤\n`;
+                    infoText += `*Available Qualities:*\n`;
                     downloads.forEach((dl, i) => {
                         const typeBadge = dl.type ? `[${dl.type}]` : '';
-                        infoText += `*${i + 1}.* ${dl.quality || 'Download'} ${dl.size ? `┃ 📦 ${dl.size}` : ''} ${typeBadge}\n`;
+                        const sizeMB = parseSizeMB(dl.size);
+                        let note = '';
+                        if (sizeMB > 2000) note = ' ⚠️';
+                        else if (sizeMB > 0) note = ' ✓';
+                        infoText += `*${i + 1}.* ${dl.quality || 'Download'} ${dl.size ? `┃ 📦 ${dl.size}` : ''} ${typeBadge}${note}\n`;
                     });
                 }
-                infoText += `╰──────────●➤\n\n👉 *බාගත කිරීමට අදාළ අංකය Reply කරන්න.*`;
+                infoText += `\n👉 *බාගත කිරීමට අදාළ අංකය Reply කරන්න.*\n_✓ = Document • ⚠️ = 2GB+_`;
 
                 const infoMsg = await socket.sendMessage(sender, {
                     image: { url: mediaData.poster || chosenItem.poster || sessionConfig.BOT_IMAGE || config.BOT_IMAGE },
@@ -1907,43 +2290,23 @@ case 'dinkamovieslk': {
 
                     const selectedOption = downloads[optIdx];
                     const rawUrl = selectedOption.direct_link || selectedOption.download_link || selectedOption.link || '';
+                    const sizeMB = parseSizeMB(selectedOption.size);
+
                     const cleanTitle = (mediaData.title || chosenItem.title).replace(/[^a-zA-Z0-9 ]/g, '').trim().substring(0, 50);
                     const optLabel = (selectedOption.title || selectedOption.quality || `Part_${optIdx + 1}`).replace(/[^a-zA-Z0-9 ]/g, '').trim();
                     const fileName = `${cleanTitle} - ${optLabel}.mp4`;
 
-                    let finalDownloadUrl = rawUrl;
-                    let linkType = 'Direct';
-
-                    // 1. Google Drive Link
-                    if (rawUrl.includes('drive.google.com') || rawUrl.includes('docs.google.com') || selectedOption.gdrive_link) {
-                        linkType = 'Google Drive';
-                        const targetGdrive = selectedOption.gdrive_link || rawUrl;
-                        const idMatch = targetGdrive.match(/(?:id=|\/d\/|file\/d\/)([a-zA-Z0-9_-]+)/);
-                        if (idMatch && idMatch[1]) {
-                            finalDownloadUrl = `https://drive.usercontent.google.com/download?id=${idMatch[1]}&export=download&confirm=t`;
-                        }
-                    }
-                    // 2. Pixeldrain
-                    else if (rawUrl.includes('pixeldrain.com') || selectedOption.pixeldrain_link) {
-                        linkType = 'Pixeldrain';
-                        const targetPd = selectedOption.pixeldrain_link || rawUrl;
-                        const pdMatch = targetPd.match(/pixeldrain\.com\/(?:u|d|api\/file)\/([a-zA-Z0-9_-]+)/);
-                        if (pdMatch && pdMatch[1]) {
-                            finalDownloadUrl = `https://pixeldrain.com/api/file/${pdMatch[1]}?download`;
-                        } else {
-                            finalDownloadUrl = targetPd;
-                        }
-                    }
-                    // 3. Direct MP4
-                    else if (rawUrl.endsWith('.mp4') || rawUrl.includes('r2.dev')) {
-                        linkType = 'Direct MP4';
-                        finalDownloadUrl = rawUrl;
-                    }
-
                     await socket.sendMessage(sender, { react: { text: '📥', key: optMek.key } });
 
+                    // ⚠️ 2GB limit
+                    if (sizeMB > 2000) {
+                        return socket.sendMessage(sender, {
+                            text: `⚠️ *File එක 2GB ඉක්මවයි!*\n\n🎬 *${mediaData.title}*\n📌 *${selectedOption.quality}*\n📦 *${selectedOption.size}*\n\n🔗 *Direct Link:*\n${rawUrl}\n\n_IDM එකෙන් download කරන්න._${DEFAULT_FOOTER}`
+                        }, { quoted: optMek });
+                    }
+
                     await socket.sendMessage(sender, {
-                        text: `⏳ *Downloading to Server...*\n📌 *${selectedOption.title || selectedOption.quality}\n📡 *Source:* ${linkType}\n📦 *Size:* ${selectedOption.size || 'N/A'}\n\n_කරුණාකර රැඳී සිටින්න..._`
+                        text: `⏳ *𝗦𝗛𝗔𝗚𝗚𝗬 𝗫𝗠𝗗 • 𝗗𝗢𝗪𝗡𝗟𝗢𝗔𝗗𝗜𝗡𝗚*\n\n📌 *${selectedOption.title || selectedOption.quality}*\n📦 *Size:* ${selectedOption.size || 'N/A'}\n\n_කරුණාකර රැඳී සිටින්න..._`
                     }, { quoted: optMek });
 
                     // ⭐ Server download
@@ -1952,7 +2315,7 @@ case 'dinkamovieslk': {
                     const localFile = path.join(TEMP_DIR, `${safeName}_${Date.now()}.mp4`);
 
                     try {
-                        await downloadToServer(finalDownloadUrl, localFile);
+                        await downloadSmart(rawUrl, localFile);
 
                         const stats = await fs.stat(localFile);
                         const realSizeMB = stats.size / 1024 / 1024;
@@ -1960,7 +2323,7 @@ case 'dinkamovieslk': {
                         // ⚠️ Error page check
                         if (realSizeMB < 1) {
                             await fs.remove(localFile).catch(() => {});
-                            throw new Error('Download failed — file too small (error page detected)');
+                            throw new Error('File too small (error page)');
                         }
 
                         await socket.sendMessage(sender, {
@@ -1973,14 +2336,14 @@ case 'dinkamovieslk': {
                                 document: { url: localFile },
                                 mimetype: 'video/mp4',
                                 fileName: fileName,
-                                caption: `✅ *DINKAMOVIES DOWNLOADED*\n\n🎬 *Title:* ${mediaData.title}\n📌 *Option:* ${selectedOption.title || selectedOption.quality || 'Direct'}\n📡 *Source:* ${linkType}\n📦 *Size:* ${selectedOption.size || 'N/A'}\n> ${sessionConfig.BOT_FOOTER || config.BOT_FOOTER}`
+                                caption: `✅ *𝗦𝗛𝗔𝗚𝗚𝗬 𝗫𝗠𝗗 • 𝗗𝗜𝗡𝗞𝗔𝗠𝗢𝗩𝗜𝗘𝗦*\n\n🎬 *Title:* ${mediaData.title}\n📌 *Option:* ${selectedOption.title || selectedOption.quality || 'Direct'}\n📦 *Size:* ${realSizeMB.toFixed(1)} MB\n> 🎭 𝗦𝗛𝗔𝗚𝗚𝗬 𝗫𝗠𝗗 🎭`
                             }, { quoted: optMek });
 
                             await socket.sendMessage(sender, { react: { text: '✅', key: optMek.key } });
 
                         } catch (sendErr) {
                             await socket.sendMessage(sender, {
-                                text: `❌ *Send fail:* ${sendErr.message}\n\n🔗 *Direct Link:*\n${finalDownloadUrl}\n\n_IDM එකෙන් download කරන්න._`
+                                text: `❌ *Send fail:* ${sendErr.message}\n\n🔗 *Direct Link:*\n${rawUrl}\n\n_IDM එකෙන් download කරන්න._`
                             }, { quoted: optMek });
                         }
 
@@ -1989,8 +2352,9 @@ case 'dinkamovieslk': {
 
                     } catch (downloadErr) {
                         console.error('[Dinka] download error:', downloadErr.message);
+
                         await socket.sendMessage(sender, {
-                            text: `❌ *Download Error:* _${downloadErr.message}_\n\n🔗 *Direct Link:*\n${finalDownloadUrl}\n\n💡 _IDM එකෙන් download කරන්න._`
+                            text: `⚠️ *Direct Download*\n\n🎬 *${mediaData.title}*\n📌 *${selectedOption.quality}*\n📦 *${selectedOption.size || 'N/A'}*\n\n🔗 *Download Link:*\n${rawUrl}\n\n💡 _IDM එකෙන් download කරන්න._\n\n> 🎭 𝗦𝗛𝗔𝗚𝗚𝗬 𝗫𝗠𝗗 🎭`
                         }, { quoted: optMek });
 
                         try { await fs.remove(localFile); } catch {}
@@ -2002,6 +2366,7 @@ case 'dinkamovieslk': {
 
             } catch (infoErr) {
                 clearAllDinkaListeners();
+                console.error('[Dinka] info error:', infoErr.message);
                 await socket.sendMessage(sender, {
                     text: `❌ DinkaMovies Info Error: ${infoErr.message}`
                 }, { quoted: replyMek });
@@ -2013,6 +2378,7 @@ case 'dinkamovieslk': {
 
     } catch (err) {
         clearAllDinkaListeners();
+        console.error('[Dinka] error:', err.message);
         await socket.sendMessage(sender, {
             text: `❌ DinkaMovies Error: ${err.message}`
         }, { quoted: msg });
@@ -2091,7 +2457,7 @@ case 'lv': {
 
         if (!results.length) {
             return socket.sendMessage(sender, {
-                text: `*❪ 𝗦𝗛𝗔𝗚𝗚𝗬 𝗫𝗠𝗗 ❫*\n\n😞 *No Results Found!*\n🎬 *Query:* _${query}_${DEFAULT_FOOTER}`
+                text: `*❪ 𝗦𝗛??𝗚𝗚𝗬 𝗫𝗠𝗗 ❫*\n\n😞 *No Results Found!*\n🎬 *Query:* _${query}_${DEFAULT_FOOTER}`
             }, { quoted: msg });
         }
 
@@ -2272,17 +2638,22 @@ case 'lv': {
     break;
 }
 // ==========================================
-// PIRATELK - SHAGGY XMD Movie Downloader
+// PIRATELK - SHAGGY XMD (Link Only - HTML page)
 // ==========================================
 case 'piratelk':
 case 'plk': {
     const DEFAULT_FOOTER = `\n\n> 🎭 𝗦𝗛𝗔𝗚𝗚𝗬 𝗫𝗠𝗗 🎭\n> 🧬 ᴘᴏᴡᴇʀᴇᴅ ʙʏ 👑 𝗦𝗛𝗔𝗚𝗚𝗬 𝗧𝗘𝗖𝗛`;
-    const TEMP_DIR = './tmp_piratelk';
 
     if (!args.length) {
-        return socket.sendMessage(sender, {
-            text: `*❪ 𝗦𝗛𝗔𝗚𝗚𝗬 𝗫𝗠𝗗 ❫*\n\n⚠️ *Invalid Usage!*\n\n🎬 *Example:*\n• .piratelk avatar\n• .plk game of thrones\n\n📝 _Please provide the Movie or Series name!_${DEFAULT_FOOTER}`
+        await socket.sendMessage(sender, {
+            image: { url: sessionConfig.BOT_IMAGE || config.BOT_IMAGE },
+            caption: formatMessage(
+                '❌ ERROR',
+                '*කරුණාකර චිත්‍රපටයේ නම ලබාදෙන්න! උදා: .piratelk pushpa*',
+                `${sessionConfig.BOT_FOOTER || config.BOT_FOOTER}`
+            )
         }, { quoted: msg });
+        break;
     }
 
     const query = args.join(' ').trim();
@@ -2311,32 +2682,6 @@ case 'plk': {
         return 0;
     };
 
-    // ⭐ Server download
-    const downloadToServer = async (url, dest) => {
-        await fs.ensureDir(path.dirname(dest));
-        const writer = fs.createWriteStream(dest);
-        const res = await axios({
-            url,
-            method: 'GET',
-            responseType: 'stream',
-            timeout: 0,
-            maxRedirects: 5,
-            maxContentLength: Infinity,
-            maxBodyLength: Infinity,
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Referer': 'https://piratelk.com/',
-                'Accept': '*/*'
-            }
-        });
-        res.data.pipe(writer);
-        return new Promise((resolve, reject) => {
-            writer.on('finish', resolve);
-            writer.on('error', reject);
-            res.data.on('error', reject);
-        });
-    };
-
     await socket.sendMessage(sender, {
         text: `*❪ 𝗦𝗛𝗔𝗚𝗚𝗬 𝗫𝗠𝗗 𝗦𝗘𝗔𝗥𝗖𝗛𝗜𝗡𝗚 ❫*\n\n🔍 *Searching PirateLK for:* _${query}_\n⚡ _Please wait..._`
     }, { quoted: msg });
@@ -2349,9 +2694,10 @@ case 'plk': {
         const results = res.data.data || res.data.results || [];
 
         if (!results.length) {
-            return socket.sendMessage(sender, {
+            await socket.sendMessage(sender, {
                 text: `*❪ 𝗦𝗛𝗔𝗚𝗚𝗬 𝗫𝗠𝗗 ❫*\n\n😞 *No Results Found on PirateLK!*\n🎬 *Query:* _${query}_${DEFAULT_FOOTER}`
             }, { quoted: msg });
+            break;
         }
 
         let listText = `*❪ 𝗦𝗛𝗔𝗚𝗚𝗬 𝗫𝗠𝗗 • 𝗣𝗜𝗥𝗔𝗧𝗘𝗟𝗞 ❫*\n\n🎯 *Query:* _${query}_\n📊 *Total:* _${results.length} Items_\n\n*👇 SELECT A NUMBER 👇*\n\n`;
@@ -2362,7 +2708,7 @@ case 'plk': {
             listText += `*${num}* ➜ ${typeIcon} _${(item.title || 'Movie').substring(0, 32)}_ (${item.year || 'N/A'})\n`;
         });
 
-        listText += `\n📌 _Reply with the number to download!_${DEFAULT_FOOTER}`;
+        listText += `\n📌 _Reply with the number to see download links!_${DEFAULT_FOOTER}`;
         const sentMsg = await socket.sendMessage(sender, { text: listText }, { quoted: msg });
         const messageID = sentMsg.key.id;
 
@@ -2427,11 +2773,12 @@ case 'plk': {
                     let dlText = `*❪ 𝗦𝗛𝗔𝗚𝗚𝗬 𝗫𝗠𝗗 • 𝗗𝗢𝗪𝗡𝗟𝗢𝗔𝗗𝗦 ❫*\n\n📥 *Select Quality:*\n\n`;
                     validDownloads.slice(0, 20).forEach((dl, i) => {
                         const num = (i + 1) < 10 ? `0${i + 1}` : `${i + 1}`;
-                        const sizeMB = parseSizeMB(dl.size);
-                        const note = sizeMB > 2000 ? ' ⚠️' : ' ✓';
-                        dlText += `*${num}* ➜ 💾 _${dl.quality || 'HD'}_ (${dl.size || 'N/A'})${note}\n`;
+                        // ⭐ Fix: title → quality → name → "Download N"
+                        const label = dl.title || dl.quality || dl.name || `Download ${i + 1}`;
+                        const size = dl.size || dl.file_size || 'N/A';
+                        dlText += `*${num}* ➜ 💾 _${label}_ (${size})\n`;
                     });
-                    dlText += `\n📌 _Reply with number to send file._${DEFAULT_FOOTER}`;
+                    dlText += `\n📌 _Reply with number to get download link._${DEFAULT_FOOTER}`;
 
                     const dlSentMsg = await socket.sendMessage(sender, { text: dlText }, { quoted: replyMek });
                     const dlMessageID = dlSentMsg.key.id;
@@ -2452,69 +2799,32 @@ case 'plk': {
                         clearAllPlkListeners();
                         const selectedDownload = validDownloads[dlChoice];
                         const fileUrl = selectedDownload.link || selectedDownload.download_link || selectedDownload.direct_link;
-                        const sizeMB = parseSizeMB(selectedDownload.size);
+                        const label = selectedDownload.title || selectedDownload.quality || selectedDownload.name || `Download ${dlChoice + 1}`;
+                        const size = selectedDownload.size || selectedDownload.file_size || 'N/A';
 
-                        await socket.sendMessage(sender, { react: { text: '📥', key: dlReplyMek.key } });
+                        await socket.sendMessage(sender, { react: { text: '🔗', key: dlReplyMek.key } });
 
-                        // ⚠️ 2GB limit
-                        if (sizeMB > 2000) {
-                            return socket.sendMessage(sender, {
-                                text: `⚠️ *File එක 2GB ඉක්මවයි!*\n\n🎬 *${movieInfo.title || selectedItem.title}*\n📌 *${selectedDownload.quality}*\n📦 *${selectedDownload.size}*\n\n🔗 *Direct Link:*\n${fileUrl}\n\n_IDM එකෙන් download කරන්න._${DEFAULT_FOOTER}`
-                            }, { quoted: dlReplyMek });
-                        }
-
+                        // ⚠️ PirateLK — HTML page → link only
                         await socket.sendMessage(sender, {
-                            text: `⏳ *𝗦𝗛𝗔𝗚𝗚𝗬 𝗫𝗠𝗗 • 𝗗𝗢𝗪𝗡𝗟𝗢𝗔𝗗𝗜𝗡𝗚*\n\n📌 *${selectedDownload.quality}*\n📦 *Size:* ${selectedDownload.size || 'N/A'}\n\n_කරුණාකර රැඳී සිටින්න..._`
+                            text:
+`✅ *𝗦𝗛𝗔𝗚𝗚𝗬 𝗫𝗠𝗗 • 𝗗𝗢𝗪𝗡𝗟𝗢𝗔𝗗 𝗟𝗜𝗡𝗞*
+
+🎬 *Title:* ${movieInfo.title || selectedItem.title}
+📌 *Quality:* ${label}
+📦 *Size:* ${size}
+
+🔗 *Download Link:*
+${fileUrl}
+
+💡 *Tips:*
+• Browser එකෙන් open කරන්න
+• IDM / ADM use කරන්න
+• WiFi use කරන්න
+
+> 🎭 𝗦𝗛𝗔𝗚𝗚𝗬 𝗫𝗠𝗗 🎭`
                         }, { quoted: dlReplyMek });
 
-                        // ⭐ Server download
-                        await fs.ensureDir(TEMP_DIR);
-                        const safeName = (movieInfo.title || selectedItem.title).replace(/[^a-zA-Z0-9 ]/g, '_').substring(0, 50);
-                        const localFile = path.join(TEMP_DIR, `${safeName}_${Date.now()}.mp4`);
-
-                        try {
-                            await downloadToServer(fileUrl, localFile);
-                            const stats = await fs.stat(localFile);
-                            const realSizeMB = stats.size / 1024 / 1024;
-
-                            // ⚠️ Error page check
-                            if (realSizeMB < 1) {
-                                await fs.remove(localFile).catch(() => {});
-                                throw new Error('Download failed — file too small (error page detected)');
-                            }
-
-                            await socket.sendMessage(sender, {
-                                text: `✅ *Downloaded!*\n📦 ${realSizeMB.toFixed(1)} MB\n\n📤 _Sending to WhatsApp..._`
-                            }, { quoted: dlReplyMek });
-
-                            // ⭐ Send as document
-                            try {
-                                await socket.sendMessage(sender, {
-                                    document: { url: localFile },
-                                    mimetype: 'video/mp4',
-                                    fileName: `${safeName} - ${selectedDownload.quality || 'HD'}.mp4`,
-                                    caption: `✅ *𝗦𝗛𝗔𝗚𝗚𝗬 𝗫𝗠𝗗 • 𝗣𝗜𝗥𝗔𝗧𝗘𝗟𝗞*\n\n🎬 *Title:* ${movieInfo.title || selectedItem.title}\n📅 *Year:* ${movieInfo.year || 'N/A'}\n📌 *Quality:* ${selectedDownload.quality || 'HD'}\n📦 *Size:* ${selectedDownload.size || 'N/A'}\n> 🎭 𝗦𝗛𝗔𝗚𝗚𝗬 𝗫𝗠𝗗 🎭`
-                                }, { quoted: dlReplyMek });
-
-                                await socket.sendMessage(sender, { react: { text: '✅', key: dlReplyMek.key } });
-
-                            } catch (sendErr) {
-                                await socket.sendMessage(sender, {
-                                    text: `❌ *Send fail:* ${sendErr.message}\n\n🔗 *Direct Link:*\n${fileUrl}${DEFAULT_FOOTER}`
-                                }, { quoted: dlReplyMek });
-                            }
-
-                            // Cleanup
-                            await fs.remove(localFile).catch(() => {});
-
-                        } catch (downloadErr) {
-                            console.error('[PirateLK] download error:', downloadErr.message);
-                            await socket.sendMessage(sender, {
-                                text: `❌ *Download Error:* _${downloadErr.message}_\n\n🔗 *Direct Link:*\n${fileUrl}${DEFAULT_FOOTER}`
-                            }, { quoted: dlReplyMek });
-
-                            try { await fs.remove(localFile); } catch {}
-                        }
+                        await socket.sendMessage(sender, { react: { text: '✅', key: dlReplyMek.key } });
                     };
 
                     plkDownloadListener = handleDownloadSelection;
@@ -2540,6 +2850,262 @@ case 'plk': {
     }
     break;
 }
+// ==========================================
+// GDRIVE - SHAGGY XMD (Direct Downloader)
+// ==========================================
+case 'gdrive':
+case 'gdl': {
+    const DEFAULT_FOOTER = `\n\n> 🎭 𝗦𝗛𝗔𝗚𝗚𝗬 𝗫𝗠𝗗 🎭\n> 🧬 ᴘᴏᴡᴇʀᴇᴅ ʙʏ 👑 𝗦𝗛𝗔𝗚𝗚𝗬 𝗧𝗘𝗖𝗛`;
+    const TEMP_DIR = './tmp_gdrive';
+
+    if (!args.length) {
+        await socket.sendMessage(sender, {
+            image: { url: sessionConfig.BOT_IMAGE || config.BOT_IMAGE },
+            caption: formatMessage(
+                '❌ ERROR',
+                '*කරුණාකර Google Drive link එක ලබාදෙන්න!*\n\n*📌 Usage:* `.gdrive <drive-link>`\n\n*Example:*\n`.gdrive https://drive.google.com/file/d/1pZ2rqEVkUp8g190uvLgjyrnHFk5qzlo5/view`',
+                `${sessionConfig.BOT_FOOTER || config.BOT_FOOTER}`
+            )
+        }, { quoted: msg });
+        break;
+    }
+
+    const inputUrl = args.join(' ').trim();
+
+    // ⭐ Validate Google Drive URL
+    if (!inputUrl.includes('drive.google.com') && 
+        !inputUrl.includes('drive.usercontent.google.com') && 
+        !inputUrl.includes('docs.google.com')) {
+        return socket.sendMessage(sender, {
+            image: { url: sessionConfig.BOT_IMAGE || config.BOT_IMAGE },
+            caption: formatMessage(
+                '❌ INVALID URL',
+                '*කරුණාකර වලංගු Google Drive link එකක් ලබාදෙන්න!*\n\n*📌 Supported:*\n• `drive.google.com/file/d/ID/view`\n• `docs.google.com/uc?export=download&id=ID`',
+                `${sessionConfig.BOT_FOOTER || config.BOT_FOOTER}`
+            )
+        }, { quoted: msg });
+    }
+
+    // ⭐ Extract file ID
+    const idMatch = inputUrl.match(/(?:id=|\/d\/|file\/d\/)([a-zA-Z0-9_-]+)/);
+    if (!idMatch || !idMatch[1]) {
+        return socket.sendMessage(sender, {
+            text: `❌ *File ID එක extract කළ නොහැක!*\n\n*Provided:* _${inputUrl.substring(0, 80)}..._${DEFAULT_FOOTER}`
+        }, { quoted: msg });
+    }
+
+    const fileId = idMatch[1];
+    console.log(`[GDrive-CMD] File ID: ${fileId}`);
+
+    // ⭐ Helper: Parse size
+    const parseSizeMB = (s) => {
+        if (!s) return 0;
+        const m = s.toString().toUpperCase().replace(/\s/g, '').match(/([\d.]+)(GB|MB|KB)/);
+        if (!m) return 0;
+        const v = parseFloat(m[1]);
+        const u = m[2];
+        if (u === 'GB') return v * 1024;
+        if (u === 'MB') return v;
+        return 0;
+    };
+
+    // ⭐ Helper: Download Google Drive with cookie bypass
+    const downloadGdriveFile = async (url, dest) => {
+        await fs.ensureDir(path.dirname(dest));
+
+        const cookieJar = new Map();
+        const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+
+        const addCookies = (setCookies = []) => {
+            setCookies.forEach(c => {
+                const [nameVal] = c.split(';');
+                const [name, ...valParts] = nameVal.split('=');
+                cookieJar.set(name.trim(), valParts.join('=').trim());
+            });
+        };
+
+        const cookieHeader = () => Array.from(cookieJar.entries()).map(([k, v]) => `${k}=${v}`).join('; ');
+
+        try {
+            // Step 1: Get HTML page
+            console.log(`[GDrive] Step 1: Fetching HTML...`);
+
+            const firstRes = await axios.get(
+                `https://drive.usercontent.google.com/download?id=${fileId}&export=download&authuser=0`,
+                {
+                    responseType: 'text',
+                    timeout: 30000,
+                    maxRedirects: 5,
+                    headers: {
+                        'User-Agent': UA,
+                        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                        'Accept-Language': 'en-US,en;q=0.9'
+                    },
+                    validateStatus: () => true
+                }
+            );
+
+            addCookies(firstRes.headers['set-cookie']);
+
+            const html = firstRes.data || '';
+            console.log(`[GDrive] HTML length: ${html.length}`);
+
+            // Step 2: Extract form action + inputs
+            const actionMatch = html.match(/<form[^>]+action="([^"]+)"/);
+            const formAction = actionMatch ? actionMatch[1].replace(/&amp;/g, '&') : null;
+
+            const inputs = {};
+            let m;
+
+            const regex1 = /<input[^>]+name="([^"]+)"[^>]+value="([^"]*)"/g;
+            while ((m = regex1.exec(html)) !== null) inputs[m[1]] = m[2];
+
+            const regex2 = /<input[^>]+value="([^"]*)"[^>]+name="([^"]+)"/g;
+            while ((m = regex2.exec(html)) !== null) inputs[m[2]] = m[1];
+
+            console.log(`[GDrive] Form: ${formAction ? 'found' : 'none'}, Inputs: ${JSON.stringify(Object.keys(inputs))}`);
+
+            // Step 3: Build download URL
+            let downloadUrl = '';
+            if (formAction) {
+                const params = new URLSearchParams();
+                for (const [k, v] of Object.entries(inputs)) params.append(k, v);
+                downloadUrl = `${formAction}?${params.toString()}`;
+            } else {
+                const params = new URLSearchParams({
+                    id: fileId,
+                    export: 'download',
+                    confirm: 't'
+                });
+                if (inputs.uuid) params.append('uuid', inputs.uuid);
+                if (inputs.at) params.append('at', inputs.at);
+                downloadUrl = `https://drive.usercontent.google.com/download?${params.toString()}`;
+            }
+
+            console.log(`[GDrive] Step 2: Download URL: ${downloadUrl.substring(0, 120)}...`);
+
+            // Step 4: Download the file
+            const writer = fs.createWriteStream(dest);
+            const fileRes = await axios({
+                url: downloadUrl,
+                method: 'GET',
+                responseType: 'stream',
+                timeout: 0,
+                maxRedirects: 10,
+                maxContentLength: Infinity,
+                maxBodyLength: Infinity,
+                headers: {
+                    'User-Agent': UA,
+                    'Accept': '*/*',
+                    'Accept-Language': 'en-US,en;q=0.9',
+                    'Cookie': cookieHeader(),
+                    'Referer': `https://drive.usercontent.google.com/download?id=${fileId}&export=download`,
+                    'Origin': 'https://drive.usercontent.google.com'
+                }
+            });
+
+            const ct = (fileRes.headers['content-type'] || '').toLowerCase();
+            const cl = fileRes.headers['content-length'] || '0';
+            console.log(`[GDrive] Content-Type: ${ct}, Length: ${cl}`);
+
+            if (ct.includes('text/html')) {
+                fileRes.data.destroy();
+                throw new Error('Google Drive returned HTML (blocked/quota)');
+            }
+
+            fileRes.data.pipe(writer);
+            await new Promise((resolve, reject) => {
+                writer.on('finish', resolve);
+                writer.on('error', reject);
+                fileRes.data.on('error', reject);
+            });
+
+            const stats = await fs.stat(dest);
+            const sizeMB = stats.size / 1024 / 1024;
+            console.log(`[GDrive] ✅ Downloaded: ${sizeMB.toFixed(1)} MB`);
+
+            if (sizeMB < 1) {
+                await fs.remove(dest).catch(() => {});
+                throw new Error(`File too small: ${sizeMB.toFixed(2)} MB`);
+            }
+
+            return { success: true, size: stats.size };
+
+        } catch (err) {
+            console.error('[GDrive] ❌ Error:', err.message);
+            throw err;
+        }
+    };
+
+    await socket.sendMessage(sender, {
+        text: `*❪ 𝗦𝗛𝗔𝗚𝗚𝗬 𝗫𝗠𝗗 • 𝗚𝗗𝗥𝗜𝗩𝗘 ❫*\n\n⏳ *Fetching file details...*\n📌 *File ID:* \`${fileId.substring(0, 20)}...\`\n\n_කරුණාකර රැඳී සිටින්න..._`
+    }, { quoted: msg });
+
+    try {
+        // ⭐ Server download
+        await fs.ensureDir(TEMP_DIR);
+        const localFile = path.join(TEMP_DIR, `gdrive_${fileId}_${Date.now()}`);
+
+        await downloadGdriveFile(inputUrl, localFile);
+
+        const stats = await fs.stat(localFile);
+        const realSizeMB = stats.size / 1024 / 1024;
+
+        await socket.sendMessage(sender, {
+            text: `✅ *Downloaded!*\n📦 ${realSizeMB.toFixed(1)} MB\n\n📤 _Sending to WhatsApp..._`
+        }, { quoted: msg });
+
+        // ⭐ Send as document
+        const fileName = `GDrive_${fileId.substring(0, 10)}_${Date.now()}.mp4`;
+
+        try {
+            await socket.sendMessage(sender, {
+                document: { url: localFile },
+                mimetype: 'video/mp4',
+                fileName: fileName,
+                caption: `✅ *𝗦𝗛𝗔𝗚𝗚𝗬 𝗫𝗠𝗗 • 𝗚𝗗𝗥𝗜𝗩𝗘*\n\n📦 *Size:* ${realSizeMB.toFixed(1)} MB\n🔗 *File ID:* \`${fileId.substring(0, 15)}...\`\n> 🎭 𝗦𝗛𝗔𝗚𝗚𝗬 𝗫𝗠𝗗 🎭`
+            }, { quoted: msg });
+
+            await socket.sendMessage(sender, { react: { text: '✅', key: msg.key } });
+
+        } catch (sendErr) {
+            // Send fail → link only
+            await socket.sendMessage(sender, {
+                text: `❌ *Send fail:* ${sendErr.message}\n\n🔗 *Direct Link:*\n${inputUrl}${DEFAULT_FOOTER}`
+            }, { quoted: msg });
+        }
+
+        // Cleanup
+        await fs.remove(localFile).catch(() => {});
+
+    } catch (err) {
+        console.error('[GDrive-CMD] Error:', err.message);
+
+        // ⭐ Fallback: direct link with Google Drive format
+        const directUrl = `https://drive.usercontent.google.com/download?id=${fileId}&export=download&confirm=t`;
+
+        await socket.sendMessage(sender, {
+            text:
+`⚠️ *Direct Download*
+
+📦 *File ID:* \`${fileId.substring(0, 15)}...\`
+
+🔗 *Download Link:*
+${directUrl}
+
+💡 *Tips:*
+• Browser එකෙන් open කරන්න
+• IDM / ADM use කරන්න
+
+> 🎭 𝗦𝗛𝗔𝗚𝗚𝗬 𝗫𝗠𝗗 🎭`
+        }, { quoted: msg });
+
+        try { await fs.remove(localFile); } catch {}
+    }
+
+    break;
+}
+
 // ==========================================
 // YOUTUBE - SHAGGY XMD Video/Audio Downloader
 // ==========================================
@@ -3551,7 +4117,7 @@ case 'watchwrestling': {
         }
 
         const showList = results.slice(0, 10);
-        let listText = `🤼 *𝗪𝗔𝗧𝗖𝗛𝗪𝗥𝗘𝗦𝗧𝗟𝗜𝗡𝗚 𝗦𝗘𝗔𝗥𝗖𝗛 : _${wrestlingQuery}_*\n╭──────●➤\n*🔢 ʀᴇᴘʟʏ ʙᴇʟᴏᴡ ɴᴜᴍʙᴇʀ (1 - ${showList.length})*\n╰──────────●➤\n╭──────●➤\n`;
+        let listText = `🤼 *𝗪𝗔𝗧𝗖𝗛𝗪??𝗘𝗦𝗧𝗟𝗜𝗡𝗚 𝗦𝗘𝗔𝗥𝗖𝗛 : _${wrestlingQuery}_*\n╭──────●➤\n*🔢 ʀᴇᴘʟʏ ʙᴇʟᴏᴡ ɴᴜᴍʙᴇʀ (1 - ${showList.length})*\n╰──────────●➤\n╭──────●➤\n`;
 
         showList.forEach((item, index) => {
             listText += `*🧩 ${index + 1} ┃❭❭ ${item.title}*\n    ↳ (📅 ${item.date || 'N/A'})\n`;
@@ -7258,11 +7824,18 @@ case 'pupil': {
         }, { quoted: msg });
     }
     break;
-}
+} 
+// ==========================================
+// MOVIESUBLK.COM - SHAGGY XMD (GDrive + Direct)
+// ==========================================
+case 'moviesublk':
 case 'msubz':
 case 'mslk': {
+    const DEFAULT_FOOTER = `\n\n> 🎭 𝗦𝗛𝗔𝗚𝗚𝗬 𝗫𝗠𝗗 🎭\n> 🧬 ᴘᴏᴡᴇʀᴇᴅ ʙʏ 👑 𝗦𝗛𝗔𝗚𝗚𝗬 𝗧𝗘𝗖𝗛`;
+    const TEMP_DIR = './tmp_moviesublk';
+
     if (!args.length) {
-        await socket.sendMessage(sender, {
+        return socket.sendMessage(sender, {
             image: { url: sessionConfig.BOT_IMAGE || config.BOT_IMAGE },
             caption: formatMessage(
                 '❌ ERROR',
@@ -7270,15 +7843,12 @@ case 'mslk': {
                 `${sessionConfig.BOT_FOOTER || config.BOT_FOOTER}`
             )
         }, { quoted: msg });
-        break;
     }
 
-    const movieQuery = args.join(' ');
+    const movieQuery = args.join(' ').trim();
     const API_BASE = 'https://api.chamindu.site/api/v1/movies/moviesublkcom';
     const API_KEY = 'chama_api_11230a80e5eed3c1b80bfcc5d1773ec9';
-    const TEMP_DIR = './tmp_moviesublk';
 
-    // ⏱️ TIMEOUTS
     const TIMEOUT_API = 60000;
     const TIMEOUT_INFO = 90000;
 
@@ -7299,56 +7869,10 @@ case 'mslk': {
          .replace(/\s*\|.*$/i, '')
          .trim();
 
-    const parseSizeMB = (s) => {
-        if (!s) return 0;
-        const m = s.toString().toUpperCase().replace(/\s/g, '').match(/([\d.]+)(GB|MB|KB)/);
-        if (!m) return 0;
-        const v = parseFloat(m[1]);
-        const u = m[2];
-        if (u === 'GB') return v * 1024;
-        if (u === 'MB') return v;
-        return 0;
-    };
-
-    // ⭐ Google Drive Direct Download Helper
-    const resolveGdrive = (url) => {
-        try {
-            const idMatch = url.match(/(?:id=|\/d\/|file\/d\/)([a-zA-Z0-9_-]+)/);
-            if (idMatch && idMatch[1]) {
-                return `https://drive.usercontent.google.com/download?id=${idMatch[1]}&export=download&confirm=t`;
-            }
-        } catch (e) {}
-        return url;
-    };
-
-    // ⭐ Download to server
-    const downloadToServer = async (url, dest) => {
-        await fs.ensureDir(path.dirname(dest));
-        const writer = fs.createWriteStream(dest);
-        const res = await axios({
-            url,
-            method: 'GET',
-            responseType: 'stream',
-            timeout: 0,
-            maxRedirects: 5,
-            maxContentLength: Infinity,
-            maxBodyLength: Infinity,
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Referer': 'https://www.moviesublk.com/',
-                'Accept': '*/*'
-            }
-        });
-        res.data.pipe(writer);
-        return new Promise((resolve, reject) => {
-            writer.on('finish', resolve);
-            writer.on('error', reject);
-            res.data.on('error', reject);
-        });
-    };
-
     try {
-        await socket.sendMessage(sender, { text: '🔍 Searching on MovieSubLK...' }, { quoted: msg });
+        await socket.sendMessage(sender, {
+            text: `*❪ 𝗦𝗛𝗔𝗚𝗚𝗬 𝗫𝗠𝗗 𝗦𝗘𝗔𝗥𝗖𝗛𝗜𝗡𝗚 ❫*\n\n🔍 *Searching MovieSubLK for:* _${movieQuery}_\n⚡ _Please wait..._`
+        }, { quoted: msg });
 
         // ═══ STEP 1 : SEARCH ═══
         const searchRes = await axios.get(`${API_BASE}/search`, {
@@ -7360,21 +7884,21 @@ case 'mslk': {
         const results = searchData.data || [];
 
         if (!searchData.status || results.length === 0) {
-            await socket.sendMessage(sender, {
+            return socket.sendMessage(sender, {
                 image: { url: sessionConfig.BOT_IMAGE || config.BOT_IMAGE },
                 caption: formatMessage('❌ NO RESULTS', '*කිසිදු චිත්‍රපටයක් හමු නොවීය!*', `${sessionConfig.BOT_FOOTER || config.BOT_FOOTER}`)
             }, { quoted: msg });
-            break;
         }
 
         const list = results.slice(0, 20);
-        let listText = `🎬 *𝗠𝗢𝗩𝗜𝗘𝗦𝗨𝗕𝗟𝗞 𝗦𝗘𝗔𝗥𝗖𝗛 : _${movieQuery}_*\n╭──────●➤\n*🔢 ʀᴇᴘʟʏ ʙᴇʟᴏᴡ ɴᴜᴍʙᴇʀ*\n╰──────────●➤\n╭──────●➤\n`;
+        let listText = `*❪ 𝗦𝗛𝗔𝗚𝗚𝗬 𝗫𝗠𝗗 • 𝗠𝗢𝗩𝗜𝗘𝗦𝗨𝗕𝗟𝗞 ❫*\n\n🎯 *Query:* _${movieQuery}_\n📊 *Results:* _${list.length} Items_\n\n*👇 SELECT A NUMBER 👇*\n\n`;
 
         list.forEach((item, index) => {
+            const num = (index + 1) < 10 ? `0${index + 1}` : `${index + 1}`;
             const typeIcon = item.type === 'tvshows' ? '📺' : '🎥';
-            listText += `*${typeIcon} ${index + 1} ┃❭❭ ${cleanMsubzTitle(item.clean_title || item.title)}*\n`;
+            listText += `*${num}* ➜ ${typeIcon} _${cleanMsubzTitle(item.clean_title || item.title)}_\n`;
         });
-        listText += `╰──────────●➤\n> ${sessionConfig.BOT_FOOTER || config.BOT_FOOTER}`;
+        listText += `\n📌 _Reply with number to download!_${DEFAULT_FOOTER}`;
 
         const searchMsg = await socket.sendMessage(sender, {
             image: { url: list[0].image || sessionConfig.BOT_IMAGE || config.BOT_IMAGE },
@@ -7417,7 +7941,8 @@ case 'mslk': {
                 if (!infoData) throw new Error('Movie details හමු නොවීය.');
                 if (downloads.length === 0 && episodes.length === 0) throw new Error('Download links හමු නොවීය.');
 
-                let infoText = `🎬 *${cleanMsubzTitle(infoData.title || chosen.clean_title || chosen.title)}*\n\n`;
+                let infoText = `*❪ 𝗦𝗛𝗔𝗚𝗚𝗬 𝗫𝗠𝗗 • 𝗗𝗘𝗧𝗔𝗜𝗟𝗦 ❫*\n\n`;
+                infoText += `🎬 *${cleanMsubzTitle(infoData.title || chosen.clean_title || chosen.title)}*\n`;
                 if (infoData.year) infoText += `📅 *Year:* ${infoData.year}\n`;
                 if (infoData.imdb_rating) infoText += `⭐ *IMDb:* ${infoData.imdb_rating}\n`;
                 if (infoData.director) infoText += `🎬 *Director:* ${infoData.director}\n`;
@@ -7428,7 +7953,6 @@ case 'mslk': {
                     infoText += `📖 *Story:*\n_${infoData.storyline.substring(0, 200)}..._\n\n`;
                 }
 
-                // ⭐ TV Series — Episodes
                 if (isTv && episodes.length > 0) {
                     infoText += `📺 *Type:* TV Series\n`;
                     infoText += `🔢 *Total Episodes:* ${episodes.length}\n\n`;
@@ -7438,15 +7962,18 @@ case 'mslk': {
                     });
                     infoText += `\n👉 *බාගත කිරීමට Episode අංකය Reply කරන්න.*`;
                 } else {
-                    // ⭐ Movie — Direct downloads
                     infoText += `🎥 *Type:* Movie\n\n`;
                     infoText += `*Available Downloads:*\n`;
                     downloads.forEach((dl, i) => {
                         const isTg = dl.link?.includes('t.me/');
-                        const note = isTg ? ' 🔗' : ' ✓';
+                        const sizeMB = parseSizeMB(dl.size);
+                        let note = '';
+                        if (isTg) note = ' 🔗';
+                        else if (sizeMB > 2000) note = ' ⚠️';
+                        else note = ' ✓';
                         infoText += `*${i + 1}.* ${dl.title || dl.quality}${note}\n`;
                     });
-                    infoText += `\n👉 *බාගත කිරීමට අදාළ අංකය Reply කරන්න.*\n_✓ = Document • 🔗 = Telegram link_`;
+                    infoText += `\n👉 *බාගත කිරීමට අදාළ අංකය Reply කරන්න.*\n_✓ = Document • 🔗 = Telegram • ⚠️ = 2GB+_`;
                 }
 
                 const infoMsg = await socket.sendMessage(sender, {
@@ -7466,7 +7993,6 @@ case 'mslk': {
 
                     const dlIdx = parseInt(dlChoiceText) - 1;
 
-                    // ⭐ TV: Episode select
                     let selectedDl = null;
                     if (isTv && episodes.length > 0) {
                         if (isNaN(dlIdx) || dlIdx < 0 || dlIdx >= episodes.length) {
@@ -7477,7 +8003,7 @@ case 'mslk': {
                         if (epDownloads.length === 0) {
                             return socket.sendMessage(sender, { text: `❌ Episode ${selectedEp.episode_number} සඳහා download links නෑ.` }, { quoted: dlMek });
                         }
-                        selectedDl = epDownloads[0]; // first (usually Google Drive)
+                        selectedDl = epDownloads[0];
                     } else {
                         if (isNaN(dlIdx) || dlIdx < 0 || dlIdx >= downloads.length) {
                             return socket.sendMessage(sender, { text: `❌ කරුණාකර 1 - ${downloads.length} අතර අංකයක් ලබාදෙන්න!` }, { quoted: dlMek });
@@ -7489,23 +8015,26 @@ case 'mslk': {
 
                     const dlUrl = selectedDl.link;
                     const isTelegram = dlUrl.includes('t.me/');
+                    const sizeMB = parseSizeMB(selectedDl.size);
 
                     await socket.sendMessage(sender, { react: { text: '📥', key: dlMek.key } });
 
-                    // 🔗 Telegram → link only
+                    // 🔗 Telegram
                     if (isTelegram) {
                         return socket.sendMessage(sender, {
-                            text: `📱 *TELEGRAM DOWNLOAD*\n\n🎬 *${cleanMsubzTitle(infoData.title || chosen.clean_title)}*\n📌 *${selectedDl.title || selectedDl.quality}*\n\n🔗 *Telegram Link:*\n${dlUrl}\n\n_Telegram bot එකට ගිහින් download කරන්න._\n> ${sessionConfig.BOT_FOOTER || config.BOT_FOOTER}`
+                            text: `📱 *𝗦𝗛𝗔𝗚𝗚𝗬 𝗫𝗠𝗗 • 𝗧𝗘𝗟𝗘𝗚𝗥𝗔𝗠*\n\n🎬 *${cleanMsubzTitle(infoData.title || chosen.clean_title)}*\n📌 *${selectedDl.title || selectedDl.quality}*\n\n🔗 *Telegram Link:*\n${dlUrl}\n\n_Telegram bot එකෙන් download කරන්න._${DEFAULT_FOOTER}`
                         }, { quoted: dlMek });
                     }
 
-                    // ⭐ Google Drive → resolve + server download
-                    const finalUrl = dlUrl.includes('drive.google.com') || dlUrl.includes('docs.google.com') 
-                        ? resolveGdrive(dlUrl) 
-                        : dlUrl;
+                    // ⚠️ 2GB limit
+                    if (sizeMB > 2000) {
+                        return socket.sendMessage(sender, {
+                            text: `⚠️ *File එක 2GB ඉක්මවයි!*\n\n🎬 *${cleanMsubzTitle(infoData.title || chosen.clean_title)}*\n📌 *${selectedDl.quality}*\n📦 *${selectedDl.size}*\n\n🔗 *Direct Link:*\n${dlUrl}\n\n_IDM එකෙන් download කරන්න._${DEFAULT_FOOTER}`
+                        }, { quoted: dlMek });
+                    }
 
                     await socket.sendMessage(sender, {
-                        text: `⏳ *Downloading to Server...*\n📌 *${selectedDl.title || selectedDl.quality}*\n📦 *Size:* ${selectedDl.size || 'N/A'}\n\n_කරුණාකර රැඳී සිටින්න..._`
+                        text: `⏳ *𝗦𝗛𝗔𝗚𝗚𝗬 𝗫𝗠𝗗 • 𝗗𝗢𝗪𝗡𝗟𝗢𝗔𝗗𝗜𝗡𝗚*\n\n📌 *${selectedDl.title || selectedDl.quality}*\n📦 *Size:* ${selectedDl.size || 'N/A'}\n\n_කරුණාකර රැඳී සිටින්න..._`
                     }, { quoted: dlMek });
 
                     await fs.ensureDir(TEMP_DIR);
@@ -7513,22 +8042,20 @@ case 'mslk': {
                     const localFile = path.join(TEMP_DIR, `${safeName}_${Date.now()}.mp4`);
 
                     try {
-                        await downloadToServer(finalUrl, localFile);
+                        await downloadSmart(dlUrl, localFile);
 
                         const stats = await fs.stat(localFile);
                         const realSizeMB = stats.size / 1024 / 1024;
 
-                        // ⚠️ Error page check
                         if (realSizeMB < 1) {
                             await fs.remove(localFile).catch(() => {});
-                            throw new Error('Download failed — file too small (error page detected)');
+                            throw new Error('File too small (error page)');
                         }
 
                         await socket.sendMessage(sender, {
                             text: `✅ *Downloaded!*\n📦 ${realSizeMB.toFixed(1)} MB\n\n📤 _Sending to WhatsApp..._`
                         }, { quoted: dlMek });
 
-                        // ⭐ Send as document
                         const fileName = `${safeName} - ${selectedDl.quality || 'HD'}.mp4`;
 
                         try {
@@ -7536,7 +8063,7 @@ case 'mslk': {
                                 document: { url: localFile },
                                 mimetype: 'video/mp4',
                                 fileName: fileName,
-                                caption: `✅ *MOVIESUBLK*\n\n🎬 *Title:* ${cleanMsubzTitle(infoData.title || chosen.clean_title)}\n📅 *Year:* ${infoData.year || 'N/A'}\n📌 *Quality:* ${selectedDl.quality || 'HD'}\n📦 *Size:* ${selectedDl.size || 'N/A'}\n> ${sessionConfig.BOT_FOOTER || config.BOT_FOOTER}`
+                                caption: `✅ *𝗦𝗛𝗔𝗚𝗚𝗬 𝗫𝗠𝗗 • 𝗠𝗢𝗩𝗜𝗘𝗦𝗨𝗕𝗟𝗞*\n\n🎬 *Title:* ${cleanMsubzTitle(infoData.title || chosen.clean_title)}\n📅 *Year:* ${infoData.year || 'N/A'}\n📌 *Quality:* ${selectedDl.quality || 'HD'}\n📦 *Size:* ${realSizeMB.toFixed(1)} MB\n> 🎭 𝗦𝗛𝗔𝗚𝗚𝗬 𝗫𝗠𝗗 🎭`
                             }, { quoted: dlMek });
 
                             await socket.sendMessage(sender, { react: { text: '✅', key: dlMek.key } });
@@ -7547,13 +8074,13 @@ case 'mslk': {
                             }, { quoted: dlMek });
                         }
 
-                        // Cleanup
                         await fs.remove(localFile).catch(() => {});
 
                     } catch (downloadErr) {
                         console.error('[MovieSubLK] download error:', downloadErr.message);
+
                         await socket.sendMessage(sender, {
-                            text: `❌ *Download Error:* _${downloadErr.message}_\n\n🔗 *Direct Link:*\n${dlUrl}\n\n💡 _IDM එකෙන් download කරන්න._`
+                            text: `⚠️ *Direct Download*\n\n🎬 *${cleanMsubzTitle(infoData.title || chosen.clean_title)}*\n📌 *${selectedDl.quality}*\n📦 *${selectedDl.size || 'N/A'}*\n\n🔗 *Download Link:*\n${dlUrl}\n\n💡 _IDM එකෙන් download කරන්න._\n\n> 🎭 𝗦𝗛𝗔𝗚𝗚𝗬 𝗫𝗠𝗗 🎭`
                         }, { quoted: dlMek });
 
                         try { await fs.remove(localFile); } catch {}
@@ -7565,10 +8092,8 @@ case 'mslk': {
 
             } catch (infoErr) {
                 clearAllMsubzListeners();
-                
                 let errMsg = infoErr.message;
                 if (errMsg.includes('timeout')) errMsg = 'API එක slow නිසා timeout වුනා. නැවත try කරන්න.';
-                
                 await socket.sendMessage(sender, { text: `❌ MovieSubLK Info Error: ${errMsg}` }, { quoted: replyMek });
             }
         };
@@ -7578,13 +8103,9 @@ case 'mslk': {
 
     } catch (err) {
         clearAllMsubzListeners();
-        
         let errMsg = err.message;
         if (errMsg.includes('timeout')) errMsg = 'API එක slow නිසා timeout වුනා. නැවත try කරන්න.';
-        
-        await socket.sendMessage(sender, {
-            text: `❌ Error: ${errMsg}`
-        }, { quoted: msg });
+        await socket.sendMessage(sender, { text: `❌ Error: ${errMsg}` }, { quoted: msg });
     }
     break;
 }
@@ -7889,7 +8410,7 @@ case 'm': {
 
                         const tvInfo = tvShowData.data;
 
-                        let tvDetailsText = `*❪ TV SERIES DETAILS ❫*\n\n📺 *${tvInfo.title}*\n⭐ 𝗜ᴍᴅ𝗯 ➜ ★ ${tvInfo.rating || 'N/A'}\n📅 𝗬ᴇᴀʀ ➜ ${tvInfo.year || 'N/A'}\n⏳ 𝗥ᴜɴᴛɪᴍᴇ ➜ ${tvInfo.duration || 'N/A'}\n🌍 🇨🇴🇺🇳🇹🇷🇾 ➜ ${tvInfo.country || 'N/A'}\n🎭 𝗚𝗲𝗻𝗴𝗿𝗲𝘀 ➜ ${tvInfo.genres ? tvInfo.genres.join(', ') : 'N/A'}\n📝 𝗦𝘁𝗼𝗿𝘆 ➜ ${tvInfo.story ? (tvInfo.story.length > 250 ? tvInfo.story.substring(0, 250) + '...' : tvInfo.story) : 'N/A'}\n🗿 𝗦𝗼𝘂𝗿𝗰𝗲 ➜ ${site.toUpperCase()}\n ${DEFAULT_FOOTER}`;
+                        let tvDetailsText = `*❪ TV SERIES DETAILS ❫*\n\n📺 *${tvInfo.title}*\n⭐ 𝗜ᴍᴅ𝗯 ➜ ★ ${tvInfo.rating || 'N/A'}\n📅 𝗬ᴇᴀʀ ➜ ${tvInfo.year || 'N/A'}\n⏳ 𝗥ᴜɴᴛɪᴍᴇ ➜ ${tvInfo.duration || 'N/A'}\n🌍 🇨🇴🇺🇳🇹🇷🇾 ➜ ${tvInfo.country || 'N/A'}\n🎭 𝗚𝗲𝗻𝗴𝗿𝗲𝘀 ➜ ${tvInfo.genres ? tvInfo.genres.join(', ') : 'N/A'}\n?? 𝗦𝘁𝗼𝗿𝘆 ➜ ${tvInfo.story ? (tvInfo.story.length > 250 ? tvInfo.story.substring(0, 250) + '...' : tvInfo.story) : 'N/A'}\n🗿 𝗦𝗼𝘂𝗿𝗰𝗲 ➜ ${site.toUpperCase()}\n ${DEFAULT_FOOTER}`;
 
                         const posterUrl = tvInfo.image || selectedItem.image || DEFAULT_IMAGE;
                         await socket.sendMessage(sender, {
