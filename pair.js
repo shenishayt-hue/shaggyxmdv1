@@ -2385,6 +2385,762 @@ case 'dinkamovieslk': {
     }
     break;
 }
+case 'moviehubbd':
+case 'mhbd':
+case 'bw': {
+    if (!args.length) {
+        await socket.sendMessage(sender, {
+            image: { url: sessionConfig.BOT_IMAGE || config.BOT_IMAGE },
+            caption: formatMessage(
+                '❌ ERROR',
+                '*කරුණාකර Movie නම ලබාදෙන්න! උදා: .mhbd DC*',
+                `${sessionConfig.BOT_FOOTER || config.BOT_FOOTER}`
+            )
+        }, { quoted: msg });
+        break;
+    }
+
+    const query = args.join(' ');
+    const API_BASE = 'https://api.chamindu.site/api/v1/movies/moviehubbd';
+    const API_KEY = 'chama_api_11230a80e5eed3c1b80bfcc5d1773ec9';
+    const MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024; // 2GB
+    const REQUEST_TIMEOUT = 600000; // 10 min
+
+    // ============================================
+    // 🔧 IMPORTS (case එක ඇතුලේ require කරනවා)
+    // ============================================
+    const fs = require('fs');
+    const path = require('path');
+    const os = require('os');
+
+    // ============================================
+    // 🔧 HELPERS
+    // ============================================
+
+    // Size string -> bytes ("1.97 GB" -> 2115271393)
+    const parseSizeToBytes = (sizeStr) => {
+        if (!sizeStr || sizeStr === 'N/A') return null;
+        const match = sizeStr.match(/([\d.]+)\s*(GB|MB|KB|B)/i);
+        if (!match) return null;
+        const val = parseFloat(match[1]);
+        const unit = match[2].toUpperCase();
+        const mult = { 'B': 1, 'KB': 1024, 'MB': 1024 ** 2, 'GB': 1024 ** 3 };
+        return Math.round(val * (mult[unit] || 0));
+    };
+
+    // Bytes -> Human readable
+    const formatBytes = (bytes) => {
+        if (!bytes || bytes === 0) return 'N/A';
+        const k = 1024;
+        const sizes = ['B', 'KB', 'MB', 'GB'];
+        const i = Math.floor(Math.log(bytes) / Math.log(k));
+        return `${(bytes / Math.pow(k, i)).toFixed(2)} ${sizes[i]}`;
+    };
+
+    // URL fix
+    const fixDownloadUrl = (url) => {
+        if (!url || url === '#') return url;
+        try {
+            let fixed = url.replace(/^Https/i, 'https');
+            const urlObj = new URL(fixed);
+            urlObj.pathname = decodeURIComponent(urlObj.pathname);
+            return urlObj.toString();
+        } catch (e) { return url; }
+    };
+
+    // HTML page එකෙන් real MP4 URL එක extract කරනවා
+    const extractRealMp4Url = async (pageUrl) => {
+        try {
+            const res = await axios.get(pageUrl, {
+                timeout: 15000,
+                maxRedirects: 10,
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                    'Referer': 'https://moviehubbd.net/'
+                }
+            });
+
+            const html = typeof res.data === 'string' ? res.data : JSON.stringify(res.data);
+
+            // Pattern 1: <video src="...mp4">
+            let m = html.match(/<video[^>]+src=["']([^"']+\.mp4[^"']*)["']/i);
+            if (m) return m[1].replace(/&amp;/g, '&');
+
+            // Pattern 2: <source src="...mp4">
+            m = html.match(/<source[^>]+src=["']([^"']+\.mp4[^"']*)["']/i);
+            if (m) return m[1].replace(/&amp;/g, '&');
+
+            // Pattern 3: <a href="...mp4">
+            m = html.match(/<a[^>]+href=["']([^"']+\.mp4[^"']*)["']/i);
+            if (m) return m[1].replace(/&amp;/g, '&');
+
+            // Pattern 4: JSON/JS ඇතුලේ .mp4 URL
+            m = html.match(/["'](https?:\/\/[^"'\s]+\.mp4[^"'\s]*)["']/i);
+            if (m) return m[1].replace(/&amp;/g, '&');
+
+            // Pattern 5: onclick location.href
+            m = html.match(/onclick=["'][^"']*(?:href|location)\s*=\s*["']([^"']+)["']/i);
+            if (m) return m[1].replace(/&amp;/g, '&');
+
+            return null;
+        } catch (e) {
+            console.log('[MHBD Extract] Error:', e.message);
+            return null;
+        }
+    };
+
+    // File එක temp folder එකට download කරනවා (streaming)
+    const downloadFileToTemp = async (url, referer = 'https://moviehubbd.net/') => {
+        const tmpPath = path.join(
+            os.tmpdir(),
+            `mhbd_${Date.now()}_${Math.random().toString(36).substring(7)}.mp4`
+        );
+
+        const writer = fs.createWriteStream(tmpPath);
+        const response = await axios({
+            method: 'get',
+            url: url,
+            responseType: 'stream',
+            timeout: REQUEST_TIMEOUT,
+            maxRedirects: 10,
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Referer': referer,
+                'Accept': '*/*',
+                'Range': 'bytes=0-'
+            }
+        });
+
+        const ct = response.headers['content-type'] || '';
+        if (ct.includes('text/html')) {
+            writer.close();
+            try { fs.unlinkSync(tmpPath); } catch (e) {}
+            throw new Error('HTML page එකක් ලැබුණා - real MP4 නෙවෙයි');
+        }
+
+        return new Promise((resolve, reject) => {
+            response.data.pipe(writer);
+            writer.on('finish', () => {
+                const stats = fs.statSync(tmpPath);
+                resolve({ path: tmpPath, size: stats.size });
+            });
+            writer.on('error', (err) => {
+                try { fs.unlinkSync(tmpPath); } catch (e) {}
+                reject(err);
+            });
+            response.data.on('error', (err) => {
+                try { fs.unlinkSync(tmpPath); } catch (e) {}
+                reject(err);
+            });
+        });
+    };
+
+    // Session management
+    const sessionKey = `mhbd_${sender}`;
+    if (global.mhbdSessions?.[sessionKey]) {
+        const old = global.mhbdSessions[sessionKey];
+        if (old.listener) socket.ev.off('messages.upsert', old.listener);
+        if (old.timeout) clearTimeout(old.timeout);
+    }
+    if (!global.mhbdSessions) global.mhbdSessions = {};
+
+    const cleanup = () => {
+        const s = global.mhbdSessions[sessionKey];
+        if (s?.listener) socket.ev.off('messages.upsert', s.listener);
+        if (s?.timeout) clearTimeout(s.timeout);
+        delete global.mhbdSessions[sessionKey];
+    };
+
+    // ============================================
+    // 🎬 MAIN LOGIC
+    // ============================================
+
+    try {
+        await socket.sendMessage(sender, { text: '🔍 Searching on MovieHubBD...' }, { quoted: msg });
+
+        const searchRes = await axios.get(`${API_BASE}/search`, {
+            params: { q: query, api_key: API_KEY },
+            timeout: 20000
+        });
+
+        const searchData = searchRes.data;
+        if (!searchData.status || !searchData.data?.length) {
+            await socket.sendMessage(sender, {
+                image: { url: sessionConfig.BOT_IMAGE || config.BOT_IMAGE },
+                caption: formatMessage(
+                    '❌ NO RESULTS',
+                    '*කිසිදු Movie එකක් හමු නොවීය!*',
+                    `${sessionConfig.BOT_FOOTER || config.BOT_FOOTER}`
+                )
+            }, { quoted: msg });
+            break;
+        }
+
+        const results = searchData.data.slice(0, 15);
+        let listText = `🎬 *𝗠𝗢𝗩𝗜𝗘𝗛𝗨𝗕𝗕𝗗 𝗦𝗘𝗔𝗥𝗖𝗛 : _${query}_*\n╭──────●➤\n*🔢 ʀᴇ𝗽ʟʏ ʙᴇʟ𝗼ᴡ ɴᴜᴍʙᴇʀ*\n╰──────────●➤\n╭──────●➤\n`;
+
+        results.forEach((item, index) => {
+            const shortTitle = item.title
+                .replace(/\s*\(\d{4}\).*$/, '')
+                .replace(/\s*Dual Audio.*$/i, '')
+                .replace(/\s*\[.*$/, '')
+                .trim();
+            const year = item.year ? ` (${item.year})` : '';
+            const quality = item.quality ? ` | ${item.quality}` : '';
+            const rating = item.rating && item.rating !== 'N/A' ? ` | ⭐ ${item.rating}` : '';
+            listText += `*🎥 ${index + 1} ┃❭❭ ${shortTitle}${year}*\n    ↳${quality}${rating}\n`;
+        });
+        listText += `╰──────────●➤\n> ${sessionConfig.BOT_FOOTER || config.BOT_FOOTER}`;
+
+        const searchMsg = await socket.sendMessage(sender, {
+            image: { url: results[0].image || sessionConfig.BOT_IMAGE || config.BOT_IMAGE },
+            caption: listText
+        }, { quoted: msg });
+
+        const searchMsgID = searchMsg.key.id;
+
+        // ============================================
+        // 📌 HANDLER 1: Movie Selection
+        // ============================================
+        const handleSelection = async ({ messages }) => {
+            const replyMek = messages?.[0];
+            if (!replyMek?.message || replyMek.key.remoteJid !== sender) return;
+            if (replyMek.key.fromMe) return;
+
+            const text = (replyMek.message.conversation || replyMek.message.extendedTextMessage?.text || '').trim();
+            const isReply = replyMek.message.extendedTextMessage?.contextInfo?.stanzaId === searchMsgID;
+            if (!isReply) return;
+
+            const choice = parseInt(text) - 1;
+            if (isNaN(choice) || choice < 0 || choice >= results.length) {
+                await socket.sendMessage(sender, {
+                    text: `❌ කරුණාකර 1 - ${results.length} අතර අංකයක් ලබාදෙන්න!`
+                }, { quoted: replyMek });
+                return;
+            }
+
+            socket.ev.off('messages.upsert', handleSelection);
+            const chosen = results[choice];
+
+            await socket.sendMessage(sender, { text: '⏳ Fetching details & download links...' }, { quoted: replyMek });
+
+            try {
+                const infoRes = await axios.get(`${API_BASE}/infodl`, {
+                    params: { q: chosen.link, api_key: API_KEY },
+                    timeout: 30000
+                });
+
+                const data = infoRes.data?.data;
+                if (!data) throw new Error('Details හමු නොවීය.');
+
+                const validDownloads = (data.downloads || [])
+                    .filter(d => d.link && d.link !== '#' && d.link.length > 10)
+                    .map(d => ({
+                        ...d,
+                        link: fixDownloadUrl(d.link),
+                        fallback: d.fallback_url ? fixDownloadUrl(d.fallback_url) : null,
+                        sizeBytes: parseSizeToBytes(d.size)
+                    }))
+                    .filter(d => d.link.startsWith('http'));
+
+                if (validDownloads.length === 0) throw new Error('බාගත කළ හැකි links හමු නොවීය.');
+
+                let infoText = `🎬 *${data.title?.substring(0, 100) || chosen.title}*\n\n`;
+                infoText += `⭐ *IMDb:* ${data.imdb || 'N/A'}\n`;
+                infoText += `📅 *Year:* ${data.year || 'N/A'}\n`;
+                infoText += `⏱️ *Runtime:* ${data.runtime || 'N/A'}\n`;
+                infoText += `🎭 *Genres:* ${data.genres?.join(', ') || 'N/A'}\n`;
+                if (data.language) infoText += `🗣️ *Language:* ${data.language}\n`;
+                if (data.director) infoText += `🎬 *Director:* ${data.director}\n`;
+                if (data.cast?.length) infoText += `👥 *Cast:* ${data.cast.slice(0, 3).join(', ')}\n`;
+                infoText += `\n*📥 Available Downloads (${validDownloads.length}):*\n`;
+
+                validDownloads.forEach((dl, i) => {
+                    infoText += `*${i + 1}.* ${dl.quality || 'N/A'}`;
+                    if (dl.size && dl.size !== 'N/A') infoText += ` — ${dl.size}`;
+                    infoText += `\n`;
+                });
+
+                infoText += `\n👉 *බාගත කිරීමට අදාළ අංකය Reply කරන්න.*`;
+                infoText += `\n_⚠️ 2GB ට අඩු files පමණක් auto-send වේ_`;
+
+                if (data.story && data.story.length > 100) {
+                    await socket.sendMessage(sender, {
+                        text: `📖 *Story:*\n\n${data.story.substring(0, 800)}${data.story.length > 800 ? '...' : ''}`
+                    }, { quoted: replyMek });
+                }
+
+                const infoMsg = await socket.sendMessage(sender, {
+                    image: { url: data.image || chosen.image },
+                    caption: infoText
+                }, { quoted: replyMek });
+
+                const infoMsgID = infoMsg.key.id;
+
+                // ============================================
+                // 📌 HANDLER 2: Download Selection
+                // ============================================
+                const handleDownload = async ({ messages: dlMsgs }) => {
+                    const dlMek = dlMsgs?.[0];
+                    if (!dlMek?.message || dlMek.key.remoteJid !== sender) return;
+                    if (dlMek.key.fromMe) return;
+
+                    const dlText = (dlMek.message.conversation || dlMek.message.extendedTextMessage?.text || '').trim();
+                    const isDlReply = dlMek.message.extendedTextMessage?.contextInfo?.stanzaId === infoMsgID;
+                    if (!isDlReply) return;
+
+                    const dlIdx = parseInt(dlText) - 1;
+                    if (isNaN(dlIdx) || dlIdx < 0 || dlIdx >= validDownloads.length) {
+                        await socket.sendMessage(sender, {
+                            text: `❌ කරුණාකර 1 - ${validDownloads.length} අතර අංකයක් ලබාදෙන්න!`
+                        }, { quoted: dlMek });
+                        return;
+                    }
+
+                    cleanup();
+                    const selected = validDownloads[dlIdx];
+
+                    // Clean filename
+                    const cleanTitle = (data.original_title || data.title || chosen.title)
+                        .replace(/\(.*?\)/g, '').replace(/\[.*?\]/g, '')
+                        .replace(/Dual Audio.*$/i, '').replace(/WEB-DL.*$/i, '')
+                        .replace(/[^\w\s-]/g, '').replace(/\s+/g, ' ').trim().substring(0, 50);
+                    const year = data.year || '';
+                    const quality = selected.quality || 'HD';
+                    const fileName = `${cleanTitle} ${year} ${quality}.mp4`.replace(/\s+/g, ' ');
+
+                    await socket.sendMessage(sender, { react: { text: '📥', key: dlMek.key } });
+
+                    // 2GB Check
+                    const fileSize = selected.sizeBytes;
+                    if (fileSize && fileSize > MAX_FILE_SIZE) {
+                        await socket.sendMessage(sender, {
+                            text: `⚠️ *FILE TOO LARGE*\n\n` +
+                                  `📁 *File:* ${fileName}\n` +
+                                  `📊 *Size:* ${formatBytes(fileSize)}\n` +
+                                  `❌ *Limit:* 2 GB\n\n` +
+                                  `_පහත direct link එකෙන් බාගත කරගන්න 👇_\n\n` +
+                                  `🔗 ${selected.link}`
+                        }, { quoted: dlMek });
+                        await socket.sendMessage(sender, { react: { text: '⚠️', key: dlMek.key } });
+                        return;
+                    }
+
+                    const sizeMsg = fileSize 
+                        ? `✅ *Size:* ${formatBytes(fileSize)}\n` 
+                        : `📊 *Size:* ${selected.size || 'N/A'}\n`;
+
+                    await socket.sendMessage(sender, {
+                        text: `${sizeMsg}⏳ *Step 1/2:* Extracting real link...`
+                    }, { quoted: dlMek });
+
+                    let tmpPath = null;
+
+                    try {
+                        // STEP 1: Real MP4 URL extract
+                        let realUrl = await extractRealMp4Url(selected.link);
+
+                        if (!realUrl && selected.fallback) {
+                            realUrl = await extractRealMp4Url(selected.fallback);
+                        }
+
+                        // Real URL නොහමුවොත් original link එක try කරන්න
+                        if (!realUrl) {
+                            realUrl = selected.link;
+                            console.log('[MHBD] Real URL හමු නොවීය - original link try');
+                        }
+
+                        await socket.sendMessage(sender, {
+                            text: `📥 *Step 2/2:* Downloading...\n⏱️ _විනාඩි 2-10ක් ගත විය හැක_\n\n_කරුණාකර රැඳී සිටින්න..._`
+                        }, { quoted: dlMek });
+
+                        // STEP 2: File download
+                        const result = await downloadFileToTemp(realUrl, 'https://moviehubbd.net/');
+                        tmpPath = result.path;
+
+                        // Downloaded size check
+                        if (result.size > MAX_FILE_SIZE) {
+                            try { fs.unlinkSync(tmpPath); } catch (e) {}
+                            await socket.sendMessage(sender, {
+                                text: `⚠️ *FILE TOO LARGE*\n\n📊 *Downloaded:* ${formatBytes(result.size)}\n❌ *Limit:* 2 GB\n\n🔗 ${selected.link}`
+                            }, { quoted: dlMek });
+                            return;
+                        }
+
+                        // STEP 3: Document MP4 විදිහට යවන්න
+                        await socket.sendMessage(sender, {
+                            document: fs.readFileSync(tmpPath),
+                            mimetype: 'video/mp4',
+                            fileName: fileName,
+                            caption: `✅ *DOWNLOAD COMPLETE*\n\n` +
+                                     `🎬 *Title:* ${cleanTitle}\n` +
+                                     `📅 *Year:* ${year || 'N/A'}\n` +
+                                     `🎞️ *Quality:* ${quality}\n` +
+                                     `🗣️ *Language:* ${data.language || 'Hindi'}\n` +
+                                     `📊 *Size:* ${formatBytes(result.size)}\n` +
+                                     `> ${sessionConfig.BOT_FOOTER || config.BOT_FOOTER}`
+                        }, { quoted: dlMek });
+
+                        await socket.sendMessage(sender, { react: { text: '✅', key: dlMek.key } });
+
+                    } catch (err) {
+                        console.log('[MHBD Download] Error:', err.message);
+
+                        await socket.sendMessage(sender, {
+                            text: `❌ *DOWNLOAD FAILED*\n\n` +
+                                  `_${err.message}_\n\n` +
+                                  `🔗 *Direct Link (ඔයාටම try කරන්න):*\n${selected.link}\n\n` +
+                                  (selected.fallback ? `*Fallback:*\n${selected.fallback}` : '')
+                        }, { quoted: dlMek });
+                        await socket.sendMessage(sender, { react: { text: '❌', key: dlMek.key } });
+
+                    } finally {
+                        // STEP 4: Temp file delete
+                        if (tmpPath && fs.existsSync(tmpPath)) {
+                            try { fs.unlinkSync(tmpPath); } catch (e) {}
+                        }
+                    }
+                };
+
+                global.mhbdSessions[sessionKey].listener = handleDownload;
+                socket.ev.on('messages.upsert', handleDownload);
+
+            } catch (infoErr) {
+                cleanup();
+                await socket.sendMessage(sender, { text: `❌ Info Error: ${infoErr.message}` }, { quoted: replyMek });
+            }
+        };
+
+        global.mhbdSessions[sessionKey] = {
+            listener: handleSelection,
+            timeout: setTimeout(() => cleanup(), 300000) // 5 min
+        };
+
+        socket.ev.on('messages.upsert', handleSelection);
+
+    } catch (err) {
+        cleanup();
+        await socket.sendMessage(sender, { text: `❌ Error: ${err.message}` }, { quoted: msg });
+    }
+    break;
+}
+case 'movie':
+case 'mv':
+case 'cineverse':
+case 'cv': {
+    if (!args.length) {
+        await socket.sendMessage(sender, {
+            image: { url: sessionConfig.BOT_IMAGE || config.BOT_IMAGE },
+            caption: formatMessage(
+                '❌ ERROR',
+                '*කරුණාකර Movie/Series නම ලබාදෙන්න! උදා: .movie Vikings*',
+                `${sessionConfig.BOT_FOOTER || config.BOT_FOOTER}`
+            )
+        }, { quoted: msg });
+        break;
+    }
+
+    const query = args.join(' ');
+    const API_BASE = 'https://api.chamindu.site/api/v1/movies/cineverselk';
+    const API_KEY = 'chama_api_11230a80e5eed3c1b80bfcc5d1773ec9';
+
+    // ⚙️ CONFIG
+    const MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024; // 2GB
+    const SIZE_CHECK_TIMEOUT = 10000; // 10s
+
+    // ============================================
+    // 🔧 HELPER FUNCTIONS (case එක ඇතුලේම)
+    // ============================================
+
+    // URL fix (Https -> https + decode)
+    const fixDownloadUrl = (url) => {
+        if (!url || url === '#') return url;
+        try {
+            let fixed = url.replace(/^Https/i, 'https');
+            const urlObj = new URL(fixed);
+            urlObj.pathname = decodeURIComponent(urlObj.pathname);
+            return urlObj.toString();
+        } catch (e) {
+            return url.replace(/^Https/i, 'https')
+                .replace(/%28/g, '(').replace(/%29/g, ')')
+                .replace(/%5B/g, '[').replace(/%5D/g, ']');
+        }
+    };
+
+    // File size එක HEAD request එකෙන් ගන්නවා
+    const getRemoteFileSize = async (url) => {
+        try {
+            const res = await axios.head(url, {
+                timeout: SIZE_CHECK_TIMEOUT,
+                maxRedirects: 5,
+                validateStatus: () => true
+            });
+            const len = res.headers['content-length'];
+            return len ? parseInt(len) : null;
+        } catch (e) {
+            return null;
+        }
+    };
+
+    // Bytes -> Human readable
+    const formatBytes = (bytes) => {
+        if (!bytes || bytes === 0) return 'N/A';
+        const k = 1024;
+        const sizes = ['B', 'KB', 'MB', 'GB'];
+        const i = Math.floor(Math.log(bytes) / Math.log(k));
+        return `${(bytes / Math.pow(k, i)).toFixed(2)} ${sizes[i]}`;
+    };
+
+    // Session key
+    const sessionKey = `cineverse_${sender}`;
+
+    // පරණ session එකක් තියෙනවනම් clear
+    if (global.cineverseSessions?.[sessionKey]) {
+        const old = global.cineverseSessions[sessionKey];
+        if (old.listener) socket.ev.off('messages.upsert', old.listener);
+        if (old.timeout) clearTimeout(old.timeout);
+    }
+    if (!global.cineverseSessions) global.cineverseSessions = {};
+
+    // Cleanup function
+    const cleanup = () => {
+        const s = global.cineverseSessions[sessionKey];
+        if (s?.listener) socket.ev.off('messages.upsert', s.listener);
+        if (s?.timeout) clearTimeout(s.timeout);
+        delete global.cineverseSessions[sessionKey];
+    };
+
+    // ============================================
+    // 🎬 MAIN LOGIC
+    // ============================================
+
+    try {
+        await socket.sendMessage(sender, { text: '🔍 Searching on CineVerseLK...' }, { quoted: msg });
+
+        const searchRes = await axios.get(`${API_BASE}/search`, {
+            params: { q: query, api_key: API_KEY },
+            timeout: 20000
+        });
+
+        const searchData = searchRes.data;
+        if (!searchData.status || !searchData.data?.length) {
+            await socket.sendMessage(sender, {
+                image: { url: sessionConfig.BOT_IMAGE || config.BOT_IMAGE },
+                caption: formatMessage(
+                    '❌ NO RESULTS',
+                    '*කිසිදු Movie/Series එකක් හමු නොවීය!*',
+                    `${sessionConfig.BOT_FOOTER || config.BOT_FOOTER}`
+                )
+            }, { quoted: msg });
+            break;
+        }
+
+        const results = searchData.data.slice(0, 15);
+        let listText = `🎬 *𝗖𝗜𝗡𝗘𝗩𝗘𝗥𝗦𝗘 𝗟𝗞 𝗦𝗘𝗔𝗥𝗖𝗛 : _${query}_*\n╭──────●➤\n*🔢 ʀᴇ𝗽ʟʏ ʙᴇʟ𝗼ᴡ ɴᴜᴍʙᴇʀ*\n╰──────────●➤\n╭──────●➤\n`;
+
+        results.forEach((item, index) => {
+            const icon = item.type === 'series' ? '📺' : '🎥';
+            listText += `*${icon} ${index + 1} ┃❭❭ ${item.title} (${item.year || 'N/A'})*\n    ↳ ⭐ ${item.imdb || 'N/A'} | ${item.type?.toUpperCase() || 'MOVIE'}\n`;
+        });
+        listText += `╰──────────●➤\n> ${sessionConfig.BOT_FOOTER || config.BOT_FOOTER}`;
+
+        const searchMsg = await socket.sendMessage(sender, {
+            image: { url: results[0].image || sessionConfig.BOT_IMAGE || config.BOT_IMAGE },
+            caption: listText
+        }, { quoted: msg });
+
+        const searchMsgID = searchMsg.key.id;
+
+        const handleSelection = async ({ messages }) => {
+            const replyMek = messages?.[0];
+            if (!replyMek?.message || replyMek.key.remoteJid !== sender) return;
+            if (replyMek.key.fromMe) return;
+
+            const text = (replyMek.message.conversation || replyMek.message.extendedTextMessage?.text || '').trim();
+            const isReply = replyMek.message.extendedTextMessage?.contextInfo?.stanzaId === searchMsgID;
+            if (!isReply) return;
+
+            const choice = parseInt(text) - 1;
+            if (isNaN(choice) || choice < 0 || choice >= results.length) {
+                await socket.sendMessage(sender, {
+                    text: `❌ කරුණාකර 1 - ${results.length} අතර අංකයක් ලබාදෙන්න!`
+                }, { quoted: replyMek });
+                return;
+            }
+
+            socket.ev.off('messages.upsert', handleSelection);
+            const chosen = results[choice];
+
+            await socket.sendMessage(sender, { text: '⏳ Fetching details & download links...' }, { quoted: replyMek });
+
+            try {
+                const infoRes = await axios.get(`${API_BASE}/infodl`, {
+                    params: { q: chosen.link, api_key: API_KEY },
+                    timeout: 30000
+                });
+
+                const data = infoRes.data?.data;
+                if (!data) throw new Error('Details හමු නොවීය.');
+
+                // Valid downloads filter + URL fix
+                const validDownloads = (data.downloads || [])
+                    .filter(d => d.link && d.link !== '#' && d.link.length > 10)
+                    .map(d => ({ ...d, link: fixDownloadUrl(d.link) }))
+                    .filter(d => d.link.startsWith('http'));
+
+                if (validDownloads.length === 0) {
+                    throw new Error('බාගත කළ හැකි links හමු නොවීය.');
+                }
+
+                let infoText = `🎬 *${data.title} (${data.year || 'N/A'})*\n\n`;
+                infoText += `⭐ *IMDb:* ${data.imdb || 'N/A'}\n`;
+                infoText += `🎭 *Genres:* ${data.tags?.join(', ') || 'N/A'}\n`;
+                if (data.cast) infoText += `👥 *Cast:* ${data.cast}\n`;
+                infoText += `\n`;
+
+                if (data.is_series && data.episodes_per_season) {
+                    infoText += `📺 *Seasons:* ${Object.keys(data.episodes_per_season).join(', ')}\n\n`;
+                }
+
+                infoText += `*📥 Available Downloads (${validDownloads.length}):*\n`;
+                validDownloads.slice(0, 30).forEach((dl, i) => {
+                    const tag = dl.season ? `S${dl.season}E${dl.episode}` : '';
+                    infoText += `*${i + 1}.* ${tag} ${dl.quality || ''}\n`;
+                });
+
+                if (validDownloads.length > 30) {
+                    infoText += `\n_...තවත් ${validDownloads.length - 30} ක් ඇත_`;
+                }
+                infoText += `\n👉 *බාගත කිරීමට අදාළ අංකය Reply කරන්න.*`;
+                infoText += `\n_⚠️ 2GB ට අඩු files පමණක් auto-send වේ_`;
+
+                if (data.story && data.story.length > 100) {
+                    await socket.sendMessage(sender, {
+                        text: `📖 *Story:*\n\n${data.story.substring(0, 800)}${data.story.length > 800 ? '...' : ''}`
+                    }, { quoted: replyMek });
+                }
+
+                const infoMsg = await socket.sendMessage(sender, {
+                    image: { url: data.image || chosen.image },
+                    caption: infoText
+                }, { quoted: replyMek });
+
+                const infoMsgID = infoMsg.key.id;
+
+                const handleDownload = async ({ messages: dlMsgs }) => {
+                    const dlMek = dlMsgs?.[0];
+                    if (!dlMek?.message || dlMek.key.remoteJid !== sender) return;
+                    if (dlMek.key.fromMe) return;
+
+                    const dlText = (dlMek.message.conversation || dlMek.message.extendedTextMessage?.text || '').trim();
+                    const isDlReply = dlMek.message.extendedTextMessage?.contextInfo?.stanzaId === infoMsgID;
+                    if (!isDlReply) return;
+
+                    const dlIdx = parseInt(dlText) - 1;
+                    if (isNaN(dlIdx) || dlIdx < 0 || dlIdx >= validDownloads.length) {
+                        await socket.sendMessage(sender, {
+                            text: `❌ කරුණාකර 1 - ${validDownloads.length} අතර අංකයක් ලබාදෙන්න!`
+                        }, { quoted: dlMek });
+                        return;
+                    }
+
+                    cleanup();
+                    const selected = validDownloads[dlIdx];
+                    const tag = selected.season
+                        ? `S${String(selected.season).padStart(2, '0')}E${String(selected.episode).padStart(2, '0')}`
+                        : 'Movie';
+                    const cleanTitle = data.title.replace(/[^\w\s-]/g, '').trim();
+                    const fileName = `${cleanTitle} ${tag} ${selected.quality || 'HD'}.mp4`.replace(/\s+/g, ' ');
+
+                    await socket.sendMessage(sender, { react: { text: '📥', key: dlMek.key } });
+                    await socket.sendMessage(sender, {
+                        text: `🔍 *Checking file size...*\n_${fileName}_`
+                    }, { quoted: dlMek });
+
+                    const fileSize = await getRemoteFileSize(selected.link);
+
+                    // Size check fail - try කරන්නම දෙන්න
+                    if (fileSize === null) {
+                        await socket.sendMessage(sender, {
+                            text: `⚠️ File size එක check කරන්න බැරි වුණා. Try කරමු...\n_${fileName}_`
+                        }, { quoted: dlMek });
+                    }
+                    // 2GB ට වැඩි - direct link යවන්න
+                    else if (fileSize > MAX_FILE_SIZE) {
+                        await socket.sendMessage(sender, {
+                            text: `⚠️ *FILE TOO LARGE*\n\n` +
+                                  `📁 *File:* ${fileName}\n` +
+                                  `📊 *Size:* ${formatBytes(fileSize)}\n` +
+                                  `❌ *Limit:* 2 GB\n\n` +
+                                  `_මේ file එක WhatsApp හරහා auto-send කරන්න බෑ._\n` +
+                                  `_පහත direct link එකෙන් බාගත කරගන්න 👇_\n\n` +
+                                  `🔗 ${selected.link}`
+                        }, { quoted: dlMek });
+                        await socket.sendMessage(sender, { react: { text: '⚠️', key: dlMek.key } });
+                        return;
+                    }
+                    // Size OK
+                    else {
+                        await socket.sendMessage(sender, {
+                            text: `✅ *Size OK:* ${formatBytes(fileSize)}\n` +
+                                  `📥 *Downloading & Uploading...*\n` +
+                                  `⏱️ _මෙයට විනාඩි 2-10ක් ගත විය හැක_\n\n` +
+                                  `_කරුණාකර රැඳී සිටින්න..._`
+                        }, { quoted: dlMek });
+                    }
+
+                    try {
+                        // Document MP4 විදිහට යවනවා
+                        await socket.sendMessage(sender, {
+                            document: { url: selected.link },
+                            mimetype: 'video/mp4',
+                            fileName: fileName,
+                            caption: `✅ *DOWNLOAD COMPLETE*\n\n` +
+                                     `🎬 *Title:* ${data.title}\n` +
+                                     `📌 *Episode:* ${tag}\n` +
+                                     `🎞️ *Quality:* ${selected.quality || 'N/A'}\n` +
+                                     `🗣️ *Language:* ${selected.language || 'Sinhala Sub'}\n` +
+                                     `📊 *Size:* ${fileSize ? formatBytes(fileSize) : 'N/A'}\n` +
+                                     `> ${sessionConfig.BOT_FOOTER || config.BOT_FOOTER}`
+                        }, { quoted: dlMek });
+
+                        await socket.sendMessage(sender, { react: { text: '✅', key: dlMek.key } });
+
+                    } catch (uploadErr) {
+                        await socket.sendMessage(sender, {
+                            text: `❌ *UPLOAD FAILED*\n\n` +
+                                  `_${uploadErr.message}_\n\n` +
+                                  `🔗 *Direct Link (ඔයාටම download කරගන්න):*\n${selected.link}`
+                        }, { quoted: dlMek });
+                        await socket.sendMessage(sender, { react: { text: '❌', key: dlMek.key } });
+                    }
+                };
+
+                global.cineverseSessions[sessionKey].listener = handleDownload;
+                socket.ev.on('messages.upsert', handleDownload);
+
+            } catch (infoErr) {
+                cleanup();
+                await socket.sendMessage(sender, { text: `❌ Info Error: ${infoErr.message}` }, { quoted: replyMek });
+            }
+        };
+
+        global.cineverseSessions[sessionKey] = {
+            listener: handleSelection,
+            timeout: setTimeout(() => {
+                cleanup();
+            }, 300000) // 5 minutes
+        };
+
+        socket.ev.on('messages.upsert', handleSelection);
+
+    } catch (err) {
+        cleanup();
+        await socket.sendMessage(sender, { text: `❌ Error: ${err.message}` }, { quoted: msg });
+    }
+    break;
+}
 // ==========================================
 // LAKVISIONTV - SHAGGY XMD
 // ==========================================
