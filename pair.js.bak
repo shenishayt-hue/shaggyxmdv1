@@ -5951,6 +5951,262 @@ case 'cmx': {
     break;
 }
 // ==========================================
+// NETHMV - Stream Vault API Movie Bot
+// ==========================================
+case 'nethmv':
+case 'vault': {
+    const DEFAULT_FOOTER = `\n\n> 🎭 𝗦𝗛𝗔𝗚𝗚𝗬 𝗫𝗠𝗗 🎭\n> 🧬 ᴘᴏᴡᴇʀᴇᴅ ʙʏ 👑 𝗦𝗛𝗔𝗚𝗚𝗬 𝗧𝗘𝗖𝗛`;
+    const TEMP_DIR = './tmp_nethmv';
+
+    // ⭐ API Config
+    const VAULT_API_BASE = 'https://stream-vault-api.lovable.app/api/public/v1';
+    const VAULT_API_KEY = 'mvk_796aa89023bfa0a1bca326895f5c30495064a557c948674b';
+
+    if (!args.length) {
+        return socket.sendMessage(sender, {
+            image: { url: sessionConfig.BOT_IMAGE || config.BOT_IMAGE },
+            caption: formatMessage(
+                '❌ ERROR',
+                '*කරුණාකර search කිරීමට keyword එකක් දෙන්න!*\n\n*📌 Usage:* `.nethmv action movie`\n*📌 Usage:* `.nethmv spider*',
+                `${sessionConfig.BOT_FOOTER || config.BOT_FOOTER}`
+            )
+        }, { quoted: msg });
+    }
+
+    const searchQuery = args.join(' ').trim();
+
+    let nethSelectionListener = null;
+    let nethDownloadListener = null;
+    let nethMasterTimeout = null;
+
+    const clearAllNethListeners = () => {
+        if (nethSelectionListener) { socket.ev.off('messages.upsert', nethSelectionListener); nethSelectionListener = null; }
+        if (nethDownloadListener)  { socket.ev.off('messages.upsert', nethDownloadListener);  nethDownloadListener  = null; }
+        if (nethMasterTimeout)     { clearTimeout(nethMasterTimeout); nethMasterTimeout = null; }
+    };
+
+    const formatBytes = (bytes) => {
+        if (!bytes || bytes === 0) return 'Unknown';
+        const mb = bytes / 1024 / 1024;
+        if (mb < 1024) return `${mb.toFixed(1)} MB`;
+        return `${(mb / 1024).toFixed(2)} GB`;
+    };
+
+    const parseSizeMB = (s) => {
+        if (!s) return 0;
+        if (typeof s === 'number') return s / 1024 / 1024;
+        const m = s.toString().toUpperCase().replace(/\s/g, '').match(/([\d.]+)(GB|MB|KB)/);
+        if (!m) return 0;
+        const v = parseFloat(m[1]);
+        const u = m[2];
+        if (u === 'GB') return v * 1024;
+        if (u === 'MB') return v;
+        return 0;
+    };
+
+    // ⭐ Server download helper
+    const downloadToServer = async (url, dest) => {
+        await fs.ensureDir(path.dirname(dest));
+        const writer = fs.createWriteStream(dest);
+        const res = await axios({
+            url,
+            method: 'GET',
+            responseType: 'stream',
+            timeout: 0,
+            maxRedirects: 10,
+            maxContentLength: Infinity,
+            maxBodyLength: Infinity,
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': '*/*'
+            }
+        });
+
+        const ct = (res.headers['content-type'] || '').toLowerCase();
+        if (ct.includes('text/html')) {
+            res.data.destroy();
+            throw new Error('HTML response (not a file)');
+        }
+
+        res.data.pipe(writer);
+        await new Promise((resolve, reject) => {
+            writer.on('finish', resolve);
+            writer.on('error', reject);
+            res.data.on('error', reject);
+        });
+
+        return await fs.stat(dest);
+    };
+
+    try {
+        await socket.sendMessage(sender, {
+            text: `*❪ 𝗦𝗛𝗔𝗚𝗚𝗬 𝗫𝗠𝗗 𝗦𝗘𝗔𝗥𝗖𝗛𝗜𝗡𝗚 ❫*\n\n🔍 *Searching Stream Vault for:* _${searchQuery}_\n⚡ _Please wait..._`
+        }, { quoted: msg });
+
+        // ═══ STEP 1 : SEARCH ═══
+        const searchRes = await axios.get(`${VAULT_API_BASE}/search`, {
+            params: { q: searchQuery, limit: 20 },
+            headers: { 'x-api-key': VAULT_API_KEY },
+            timeout: 30000
+        });
+
+        const searchData = searchRes.data;
+        const files = searchData.files || [];
+
+        if (!searchData.count || files.length === 0) {
+            return socket.sendMessage(sender, {
+                image: { url: sessionConfig.BOT_IMAGE || config.BOT_IMAGE },
+                caption: formatMessage(
+                    '❌ NO RESULTS',
+                    `*"${searchQuery}"* සඳහා කිසිදු file එකක් හමු නොවීය!`,
+                    `${sessionConfig.BOT_FOOTER || config.BOT_FOOTER}`
+                )
+            }, { quoted: msg });
+        }
+
+        let listText = `*❪ 𝗦𝗛𝗔𝗚𝗚𝗬 𝗫𝗠𝗗 • 𝗡𝗘𝗧𝗛𝗠𝗩 ❫*\n\n🎯 *Query:* _${searchQuery}_\n📊 *Results:* _${files.length} Items_\n\n*👇 SELECT A NUMBER 👇*\n\n`;
+
+        files.forEach((file, index) => {
+            const num = (index + 1) < 10 ? `0${index + 1}` : `${index + 1}`;
+            const sizeMB = parseSizeMB(file.size_bytes);
+            let sizeStr = 'Unknown';
+            if (sizeMB > 0) {
+                sizeStr = sizeMB > 1024 ? `${(sizeMB / 1024).toFixed(2)} GB` : `${sizeMB.toFixed(1)} MB`;
+            }
+            listText += `*${num}* ➜ 🎬 _${file.name || file.filename}_*\n    ↳ _(${file.type || 'file'} | ${sizeStr})_\n`;
+        });
+        listText += `\n📌 _Reply with number to download!_${DEFAULT_FOOTER}`;
+
+        const searchMsg = await socket.sendMessage(sender, { text: listText }, { quoted: msg });
+        const searchMsgID = searchMsg.key.id;
+
+        nethMasterTimeout = setTimeout(clearAllNethListeners, 180000);
+
+        // ═══ STEP 2 : USER PICKS FILE ═══
+        const handleNethSelection = async ({ messages }) => {
+            const replyMek = messages?.[0];
+            if (!replyMek?.message || replyMek.key.remoteJid !== sender) return;
+
+            const text = (replyMek.message.conversation || replyMek.message.extendedTextMessage?.text || '').trim();
+            const isReply = replyMek.message.extendedTextMessage?.contextInfo?.stanzaId === searchMsgID;
+            if (!isReply) return;
+
+            const choice = parseInt(text) - 1;
+            if (isNaN(choice) || choice < 0 || choice >= files.length) {
+                return socket.sendMessage(sender, { text: `❌ කරුණාකර 1 - ${files.length} අතර අංකයක් ලබාදෙන්න!` }, { quoted: replyMek });
+            }
+
+            if (nethSelectionListener) { socket.ev.off('messages.upsert', nethSelectionListener); nethSelectionListener = null; }
+
+            const chosenFile = files[choice];
+
+            await socket.sendMessage(sender, { react: { text: '📥', key: replyMek.key } });
+            await socket.sendMessage(sender, {
+                text: `⏳ *Fetching file details...*\n\n🎬 *${chosenFile.name}*\n📦 *Size:* ${formatBytes(chosenFile.size_bytes)}\n\n_කරුණාකර රැඳී සිටින්න..._`
+            }, { quoted: replyMek });
+
+            try {
+                // ═══ STEP 3 : Get fresh download link ═══
+                let fileData = chosenFile;
+
+                // Fresh link එකක් ඕන නම් — `/files/:id` call කරන්න
+                try {
+                    const freshRes = await axios.get(`${VAULT_API_BASE}/files/${chosenFile.id}`, {
+                        headers: { 'x-api-key': VAULT_API_KEY },
+                        timeout: 30000
+                    });
+                    if (freshRes.data && freshRes.data.download_url) {
+                        fileData = freshRes.data;
+                    }
+                } catch (freshErr) {
+                    console.log('[NethMV] Fresh link fetch failed, using search link:', freshErr.message);
+                }
+
+                const dlUrl = fileData.download_url || fileData.stream_url;
+                const sizeMB = parseSizeMB(fileData.size_bytes);
+                const isVideo = (fileData.mime_type || '').includes('video');
+                const fileName = fileData.filename || `${fileData.name || 'file'}.mp4`;
+
+                if (!dlUrl) {
+                    throw new Error('Download link එක හමු නොවීය.');
+                }
+
+                // ⚠️ 2GB limit → link only
+                if (sizeMB > 2000) {
+                    return socket.sendMessage(sender, {
+                        text: `⚠️ *File එක 2GB ඉක්මවයි!*\n\n🎬 *${fileData.name}*\n📦 *Size:* ${formatBytes(fileData.size_bytes)}\n\n🔗 *Direct Link:*\n${dlUrl}\n\n_IDM එකෙන් download කරන්න._${DEFAULT_FOOTER}`
+                    }, { quoted: replyMek });
+                }
+
+                // ⭐ Server download
+                await fs.ensureDir(TEMP_DIR);
+                const safeName = (fileData.name || 'file').replace(/[^a-zA-Z0-9 ]/g, '_').substring(0, 50);
+                const localFile = path.join(TEMP_DIR, `${safeName}_${Date.now()}${path.extname(fileName) || '.mp4'}`);
+
+                await downloadToServer(dlUrl, localFile);
+
+                const stats = await fs.stat(localFile);
+                const realSizeMB = stats.size / 1024 / 1024;
+
+                if (realSizeMB < 1) {
+                    await fs.remove(localFile).catch(() => {});
+                    throw new Error('File too small (error page)');
+                }
+
+                await socket.sendMessage(sender, {
+                    text: `✅ *Downloaded!*\n📦 ${realSizeMB.toFixed(1)} MB\n\n📤 _Sending to WhatsApp..._`
+                }, { quoted: replyMek });
+
+                // ⭐ Send as document
+                try {
+                    await socket.sendMessage(sender, {
+                        document: { url: localFile },
+                        mimetype: isVideo ? 'video/mp4' : 'application/octet-stream',
+                        fileName: fileName,
+                        caption: `✅ *𝗦𝗛𝗔𝗚𝗚𝗬 𝗫𝗠𝗗 • 𝗡𝗘𝗧𝗛𝗠𝗩*\n\n🎬 *Name:* ${fileData.name}\n📝 *Description:* ${(fileData.description || 'N/A').substring(0, 100)}\n📦 *Size:* ${formatBytes(fileData.size_bytes)}\n🏷️ *Type:* ${fileData.type || 'file'}\n> 🎭 𝗦𝗛𝗔𝗚𝗚𝗬 𝗫𝗠𝗗 🎭`
+                    }, { quoted: replyMek });
+
+                    await socket.sendMessage(sender, { react: { text: '✅', key: replyMek.key } });
+
+                } catch (sendErr) {
+                    await socket.sendMessage(sender, {
+                        text: `❌ *Send fail:* ${sendErr.message}\n\n🔗 *Direct Link:*\n${dlUrl}${DEFAULT_FOOTER}`
+                    }, { quoted: replyMek });
+                }
+
+                // Cleanup
+                await fs.remove(localFile).catch(() => {});
+
+            } catch (err) {
+                console.error('[NethMV] download error:', err.message);
+                clearAllNethListeners();
+
+                await socket.sendMessage(sender, {
+                    text: `⚠️ *Direct Download*\n\n🎬 *${chosenFile.name}*\n📦 *Size:* ${formatBytes(chosenFile.size_bytes)}\n\n🔗 *Download Link:*\n${chosenFile.download_url || chosenFile.stream_url || 'N/A'}\n\n💡 _IDM එකෙන් download කරන්න._${DEFAULT_FOOTER}`
+                }, { quoted: replyMek });
+            }
+        };
+
+        nethSelectionListener = handleNethSelection;
+        socket.ev.on('messages.upsert', nethSelectionListener);
+
+    } catch (err) {
+        clearAllNethListeners();
+        console.error('[NethMV] error:', err.message);
+
+        let errMsg = err.message;
+        if (errMsg.includes('401')) errMsg = 'API Key එක වැරදියි.';
+        else if (errMsg.includes('403')) errMsg = 'API Key එක revoke කරලා.';
+        else if (errMsg.includes('429')) errMsg = 'Rate limit ඉක්මවා ඇත. පසුව try කරන්න.';
+        else if (errMsg.includes('500')) errMsg = 'Server error. නැවත try කරන්න.';
+
+        await socket.sendMessage(sender, {
+            text: `❌ *NethMV Error:* _${errMsg}_${DEFAULT_FOOTER}`
+        }, { quoted: msg });
+    }
+    break;
+}
+// ==========================================
 // MOVIEMANIALK - Fixed (Server Download)
 // ==========================================
 case 'moviemania':
